@@ -1,0 +1,45 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug Extension with DuckDB",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "/Users/jimmarriott/development/github/sideprojects/duckdb_salesforce/build/debug/duckdb",
+            "args": ["-echo", "-c", "LOAD 'build/debug/extension/salesforce/salesforce.duckdb_extension'; SELECT Id, 'Hello' hello, 1, Name FROM salesforce_object('Retailer__c', 10) WHERE Name LIKE 'A%' ORDER BY Name DESC;"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "lldb",
+            "preLaunchTask": "build-debug-extension",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for lldb",
+                    "text": "settings set target.inline-breakpoint-strategy always",
+                    "ignoreFailures": true
+                }
+            ]
+        },
+        {
+            "name": "Debug Extension Script",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "/opt/homebrew/bin/duckdb",
+            "args": ["debug.db", "-echo", "-init", "test.sql"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "lldb",
+            "preLaunchTask": "prepare-debug-script",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for lldb",
+                    "text": "settings set target.inline-breakpoint-strategy always",
+                    "ignoreFailures": true
+                }
+            ]
+        }
+    ]
+} 

@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "*.frag": "glsl",
+        "string": "cpp",
+        "unordered_map": "cpp",
+        "vector": "cpp"
+    }
+}

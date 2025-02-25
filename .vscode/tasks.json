@@ -1,0 +1,45 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "build-debug-extension",
+            "type": "shell",
+            "command": "GEN=ninja make debug",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ]
+        },
+        {
+            "label": "prepare-debug-script",
+            "type": "shell",
+            "command": "make debug && cat > test.sql << EOF\nLOAD 'build/debug/extension/salesforce/salesforce.duckdb_extension';\nSELECT salesforce('test') AS version;\nSELECT * FROM salesforce_object('Account') LIMIT 5;\nEOF",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ]
+        },
+        {
+            "label": "run-test-script",
+            "type": "shell",
+            "command": "./test_extension.sh",
+            "group": "test",
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "problemMatcher": []
+        }
+    ]
+} 
