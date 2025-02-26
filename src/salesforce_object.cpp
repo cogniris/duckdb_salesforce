@@ -3,6 +3,7 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/common/types/date.hpp"
 #include "duckdb/common/types/timestamp.hpp"
+#include "duckdb/planner/filter/optional_filter.hpp"
 #include <curl/curl.h>
 #include <string>
 #include <vector>
@@ -546,7 +547,8 @@ static unique_ptr<GlobalTableFunctionState> SalesforceObjectInitGlobalState(Clie
 
 static void GenerateSOQLWhereClauseInternal(const std::string &column_name, TableFilter *filter, std::stringstream &where_clause) {
     switch (filter->filter_type) {
-        case duckdb::TableFilterType::CONSTANT_COMPARISON: {
+        case duckdb::TableFilterType::CONSTANT_COMPARISON: 
+        case duckdb::TableFilterType::IN_FILTER: {
             where_clause << filter->ToString(column_name).c_str();
             return;
         }
@@ -570,6 +572,10 @@ static void GenerateSOQLWhereClauseInternal(const std::string &column_name, Tabl
             GenerateSOQLWhereClauseInternal(column_name, conjuction_filter->child_filters.back().get(), where_clause);
             return;
         }
+        case duckdb::TableFilterType::OPTIONAL_FILTER: {
+		    auto optional_filter = reinterpret_cast<duckdb::OptionalFilter *>(filter);
+		    return GenerateSOQLWhereClauseInternal(column_name, optional_filter->child_filter.get(), where_clause);
+	    }
         default: {
             return;
         }
