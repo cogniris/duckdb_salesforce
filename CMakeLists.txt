@@ -40,6 +40,7 @@ include_directories(${json_SOURCE_DIR}/include)  # Include nlohmann_json headers
 set(EXTENSION_SOURCES 
     src/salesforce_extension.cpp
     src/salesforce_object.cpp
+    src/salesforce_metadata_cache.cpp
 )
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})

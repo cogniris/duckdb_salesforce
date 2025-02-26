@@ -1,4 +1,5 @@
 #include "salesforce_object.hpp"
+#include "include/salesforce_metadata_cache.hpp"
 #include "duckdb.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/common/types/date.hpp"
@@ -10,6 +11,7 @@
 #include <unordered_map>
 #include <iostream>
 #include <sstream>
+#include <mutex>
 #include "nlohmann/json.hpp"
 
 using json = nlohmann::json;
@@ -132,36 +134,6 @@ static void EnsureValidToken(SalesforceCredentials &credentials) {
     }
 }
 
-// Salesforce data type mapping to DuckDB types
-static LogicalType MapSalesforceType(const std::string &sf_type) {
-    if (sf_type == "id" || sf_type == "string" || sf_type == "reference" || sf_type == "picklist" || 
-        sf_type == "multipicklist" || sf_type == "textarea" || sf_type == "phone" || sf_type == "url" || 
-        sf_type == "email") {
-        return LogicalType::VARCHAR;
-    } else if (sf_type == "boolean") {
-        return LogicalType::BOOLEAN;
-    } else if (sf_type == "int") {
-        return LogicalType::INTEGER;
-    } else if (sf_type == "double" || sf_type == "currency" || sf_type == "percent") {
-        return LogicalType::DOUBLE;
-    } else if (sf_type == "date") {
-        return LogicalType::DATE;
-    } else if (sf_type == "datetime") {
-        return LogicalType::TIMESTAMP;
-    } else {
-        // Default to VARCHAR for unknown types
-        return LogicalType::VARCHAR;
-    }
-}
-
-// Structure to hold field metadata
-struct SalesforceField {
-    std::string name;
-    std::string type;
-    bool nillable;
-    LogicalType duckdb_type;
-};
-
 // Structure to hold Salesforce scan bind data
 struct SalesforceScanBindData : public TableFunctionData {
     long row_limit;
@@ -181,6 +153,13 @@ struct SalesforceScanState : public LocalTableFunctionState {
 
 // Function to fetch Salesforce object metadata
 static std::vector<SalesforceField> FetchSalesforceObjectMetadata(const std::string &object_name, SalesforceCredentials &credentials) {
+    // Check if metadata is in cache
+    auto cache = SalesforceMetadataCache::GetInstance();
+    if (cache->IsInCache(object_name)) {
+        return cache->GetFromCache(object_name);
+    }
+    
+    // If not in cache, fetch from Salesforce API
     std::vector<SalesforceField> fields;
     
     // Ensure we have a valid token
@@ -233,6 +212,9 @@ static std::vector<SalesforceField> FetchSalesforceObjectMetadata(const std::str
             sf_field.duckdb_type = MapSalesforceType(sf_field.type);
             fields.push_back(sf_field);
         }
+        
+        // Add metadata to cache
+        cache->AddToCache(object_name, fields);
     } catch (const std::exception &e) {
         throw std::runtime_error("Failed to parse Salesforce metadata: " + std::string(e.what()));
     }
@@ -368,12 +350,14 @@ static Value ConvertSalesforceValue(const json &value, const LogicalType &type, 
         case LogicalTypeId::INTEGER:
             return Value::INTEGER(value.get<int32_t>());
         case LogicalTypeId::DOUBLE:
-            return Value::DOUBLE(value.get<double>());
-        /*
+            return Value::DOUBLE(value.get<double>());   
         case LogicalTypeId::DATE: {
             std::string date_str = value.get<std::string>();
             date_t date_val;
-            if (!Date::TryConvertDate(date_str.c_str(), date_str.length(), date_val)) {
+            bool special;
+            idx_t pos = 0;
+            DateCastResult result = Date::TryConvertDate(date_str.c_str(), date_str.length(), pos, date_val, special);
+            if (result != DateCastResult::SUCCESS) {
                 throw std::runtime_error("Failed to convert Salesforce date value: " + date_str);
             }
             return Value::DATE(date_val);
@@ -381,12 +365,12 @@ static Value ConvertSalesforceValue(const json &value, const LogicalType &type, 
         case LogicalTypeId::TIMESTAMP: {
             std::string ts_str = value.get<std::string>();
             timestamp_t ts_val;
-            if (!Timestamp::TryConvertTimestamp(ts_str.c_str(), ts_str.length(), ts_val)) {
+            TimestampCastResult result = Timestamp::TryConvertTimestamp(ts_str.c_str(), ts_str.length(), ts_val);
+            if (result != TimestampCastResult::SUCCESS) {
                 throw std::runtime_error("Failed to convert Salesforce timestamp value: " + ts_str);
             }
             return Value::TIMESTAMP(ts_val);
-        }
-        */
+        }       
         default:
             return Value(value.get<std::string>());
     }
