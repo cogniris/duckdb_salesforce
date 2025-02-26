@@ -6,7 +6,7 @@
             "type": "cppdbg",
             "request": "launch",
             "program": "/Users/jimmarriott/development/github/sideprojects/duckdb_salesforce/build/debug/duckdb",
-            "args": ["-echo", "-c", "LOAD 'build/debug/extension/salesforce/salesforce.duckdb_extension'; SELECT Id, 'Hello' hello, 1, Name FROM salesforce_object('Retailer__c', 10) WHERE Name LIKE 'A%' ORDER BY Name DESC;"],
+            "args": ["-echo", "-c", "LOAD 'build/debug/extension/salesforce/salesforce.duckdb_extension'; SELECT pa.Id, pa.Name, q.* FROM salesforce_object('PurchasedAllowanceQuota__c', 100) as q JOIN salesforce_object('PurchasedAllowance__c', 0) as pa ON pa.Id = q.PurchasedAllowance__c WHERE q.CurrencyIsoCode = 'GBP';"],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "environment": [],
