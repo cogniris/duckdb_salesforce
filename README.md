@@ -1,13 +1,123 @@
-# Salesforce
+# DuckDB Salesforce Extension
 
-This repository is based on https://github.com/duckdb/extension-template, check it out if you want to build and ship your own DuckDB extension.
+This extension allows you to query Salesforce data directly from DuckDB, enabling seamless integration between your Salesforce instance and DuckDB's powerful analytical capabilities.
 
----
+WARNING!!!
+This code has been heavily generated using Claude 3.7 with some hand holding/tweaks from a non C++ developer. I fully expect that it is a horrorshow to a seasoned C++ engineer.
+It is working well enough for my purposes currently.
 
-This extension, Salesforce, allow you to ... <extension_goal>.
+## Features
+
+- **Direct Salesforce Object Querying**: Query Salesforce objects as if they were database tables
+- **Secure Credential Management**: Store and manage Salesforce credentials securely using DuckDB's Secret Manager
+- **Automatic Authentication**: Handles OAuth 2.0 authentication flow with automatic token refresh
+- **Metadata Caching**: Caches object metadata to improve performance
+- **Filter Pushdown**: Pushes filters to Salesforce API for efficient querying
+- **Projection Pushdown**: Only retrieves the columns you need
+- **Pagination Handling**: Automatically handles Salesforce API pagination for large result sets
+
+## Usage
+
+### Installation
+
+```sql
+INSTALL salesforce;
+LOAD salesforce;
+```
+
+### Setting up Salesforce Credentials
+
+Store your Salesforce credentials securely using DuckDB's Secret Manager:
+
+```sql
+CREATE OR REPLACE PERSISTENT SECRET dev (
+    TYPE salesforce,
+    LOGIN_URL 'https://test.salesforce.com',
+    CLIENT_ID '<your client id>',
+    CLIENT_SECRET '<your client secret>',
+    USERNAME '<your username>',
+    PASSWORD '<your password+security token>');
+
+```
+
+### Querying Salesforce Objects
+
+Once your credentials are set up, you can query Salesforce objects:
+
+```sql
+-- Query all fields from Account
+SELECT * FROM salesforce_object('my_salesforce_org', 'Account');
+
+-- Query specific fields with a limit
+SELECT Id, Name, Industry 
+FROM salesforce_object('my_salesforce_org', 'Account', row_limit=100);
+
+-- Apply filters (these will be pushed down to Salesforce)
+SELECT Id, Name, AnnualRevenue
+FROM salesforce_object('my_salesforce_org', 'Account')
+WHERE Industry = 'Technology' AND AnnualRevenue > 1000000;
+
+-- Join with local data
+SELECT a.Name, a.Industry, o.Amount
+FROM salesforce_object('my_salesforce_org', 'Account') a
+JOIN salesforce_object('my_salesforce_org', 'Opportunity') o
+  ON a.Id = o.AccountId
+WHERE o.StageName = 'Closed Won';
+```
+Replacement scans are also supported so the following simpler syntax will also work:
+
+```sql
+-- Query all fields from Account
+SELECT * FROM my_salesforce_org.Account;
 
 
-## Building
+-- Apply filters (these will be pushed down to Salesforce)
+SELECT Id, Name, AnnualRevenue
+FROM my_salesforce_org.Account
+WHERE Industry = 'Technology' AND AnnualRevenue > 1000000;
+
+-- Join with local data
+SELECT a.Name, a.Industry, o.Amount
+FROM my_salesforce_org.Account a
+JOIN my_salesforce_org.Opportunity o
+  ON a.Id = o.AccountId
+WHERE o.StageName = 'Closed Won';
+```
+
+## Technical Details
+
+### Data Type Mapping
+
+The extension automatically maps Salesforce data types to appropriate DuckDB types:
+
+| Salesforce Type | DuckDB Type |
+|-----------------|-------------|
+| string, id, reference | VARCHAR |
+| boolean | BOOLEAN |
+| int, currency | INTEGER |
+| double, percent | DOUBLE |
+| date | DATE |
+| datetime | TIMESTAMP |
+| *other types* | VARCHAR |
+
+### Performance Considerations
+
+- **Metadata Caching**: Object metadata is cached for 1 hour by default to reduce API calls
+- **Filter Pushdown**: WHERE clauses are converted to SOQL filters and executed on the Salesforce server
+- **Projection Pushdown**: Only requested columns are retrieved from Salesforce
+- **Pagination**: Results are automatically paginated for large result sets
+- **Row Limits**: Use the `row_limit` parameter to limit the number of rows returned
+
+### Limitations
+
+- Complex SOQL features like aggregate functions are not supported
+- Relationship queries are limited to direct field access (e.g., `Owner.Name`)
+- Updates and inserts to Salesforce are not supported (read-only)
+- Binary fields (base64) are not supported
+- Geolocation fields are not supported
+
+## Building from Source
+
 ### Managing dependencies
 DuckDB extensions uses VCPKG for dependency management. Enabling VCPKG is very simple: follow the [installation instructions](https://vcpkg.io/en/getting-started) or just run the following:
 ```shell
@@ -15,81 +125,17 @@ git clone https://github.com/Microsoft/vcpkg.git
 ./vcpkg/bootstrap-vcpkg.sh
 export VCPKG_TOOLCHAIN_PATH=`pwd`/vcpkg/scripts/buildsystems/vcpkg.cmake
 ```
-Note: VCPKG is only required for extensions that want to rely on it for dependency management. If you want to develop an extension without dependencies, or want to do your own dependency management, just skip this step. Note that the example extension uses VCPKG to build with a dependency for instructive purposes, so when skipping this step the build may not work without removing the dependency.
 
 ### Build steps
-Now to build the extension, run:
+To build the extension, run:
 ```sh
-make
+GEN=ninja make
 ```
+
 The main binaries that will be built are:
 ```sh
 ./build/release/duckdb
 ./build/release/test/unittest
 ./build/release/extension/salesforce/salesforce.duckdb_extension
 ```
-- `duckdb` is the binary for the duckdb shell with the extension code automatically loaded.
-- `unittest` is the test runner of duckdb. Again, the extension is already linked into the binary.
-- `salesforce.duckdb_extension` is the loadable binary as it would be distributed.
 
-## Running the extension
-To run the extension code, simply start the shell with `./build/release/duckdb`.
-
-Now we can use the features from the extension directly in DuckDB. The template contains a single scalar function `salesforce()` that takes a string arguments and returns a string:
-```
-D select salesforce('Jane') as result;
-┌───────────────┐
-│    result     │
-│    varchar    │
-├───────────────┤
-│ Salesforce Jane 🐥 │
-└───────────────┘
-```
-
-## Running the tests
-Different tests can be created for DuckDB extensions. The primary way of testing DuckDB extensions should be the SQL tests in `./test/sql`. These SQL tests can be run using:
-```sh
-make test
-```
-
-### Installing the deployed binaries
-To install your extension binaries from S3, you will need to do two things. Firstly, DuckDB should be launched with the
-`allow_unsigned_extensions` option set to true. How to set this will depend on the client you're using. Some examples:
-
-CLI:
-```shell
-duckdb -unsigned
-```
-
-Python:
-```python
-con = duckdb.connect(':memory:', config={'allow_unsigned_extensions' : 'true'})
-```
-
-NodeJS:
-```js
-db = new duckdb.Database(':memory:', {"allow_unsigned_extensions": "true"});
-```
-
-Secondly, you will need to set the repository endpoint in DuckDB to the HTTP url of your bucket + version of the extension
-you want to install. To do this run the following SQL query in DuckDB:
-```sql
-SET custom_extension_repository='bucket.s3.eu-west-1.amazonaws.com/<your_extension_name>/latest';
-```
-Note that the `/latest` path will allow you to install the latest extension version available for your current version of
-DuckDB. To specify a specific version, you can pass the version instead.
-
-After running these steps, you can install and load your extension using the regular INSTALL/LOAD commands in DuckDB:
-```sql
-INSTALL salesforce
-LOAD salesforce
-```
-
-## Debugging
-
-For detailed instructions on how to debug the extension, see [DEBUG.md](DEBUG.md).
-
-Quick start:
-1. Make sure DuckDB CLI is installed: `brew install duckdb`
-2. Run the test script: `./test_extension.sh`
-3. Set breakpoints in VSCode and use the provided debug configurations
