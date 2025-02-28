@@ -5,18 +5,102 @@
 #include "duckdb/common/types/date.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/planner/filter/optional_filter.hpp"
-#include <curl/curl.h>
 #include <string>
 #include <vector>
 #include <unordered_map>
 #include <iostream>
 #include <sstream>
 #include <mutex>
-#include "nlohmann/json.hpp"
 
-using json = nlohmann::json;
+#include "yyjson.hpp"
+
+using namespace duckdb_yyjson;
+
+// Define OpenSSL support before including httplib
+#define CPPHTTPLIB_OPENSSL_SUPPORT
+// Include httplib from DuckDB's third_party directory
+#include "httplib.hpp"
+
+// Use the OpenSSL-enabled version of httplib
+using namespace duckdb_httplib_openssl;
 
 namespace duckdb {
+
+// Define a structure to hold Salesforce record data
+struct SalesforceRecord {
+    // Store the parsed JSON document and root value
+    yyjson_doc *doc;
+    yyjson_val *root;
+    
+    // Constructor
+    SalesforceRecord(yyjson_doc *d, yyjson_val *r) : doc(d), root(r) {}
+    
+    // Destructor to free the document
+    ~SalesforceRecord() {
+        if (doc) {
+            yyjson_doc_free(doc);
+        }
+    }
+    
+    // Copy constructor
+    SalesforceRecord(const SalesforceRecord &other) {
+        // Create a deep copy of the document
+        yyjson_read_flag flags = YYJSON_READ_ALLOW_INVALID_UNICODE;
+        char *json_str = yyjson_val_write(other.root, 0, nullptr);
+        doc = yyjson_read(json_str, strlen(json_str), flags);
+        root = yyjson_doc_get_root(doc);
+        free(json_str);
+    }
+    
+    // Move constructor
+    SalesforceRecord(SalesforceRecord &&other) noexcept : doc(other.doc), root(other.root) {
+        other.doc = nullptr;
+        other.root = nullptr;
+    }
+    
+    // Assignment operator
+    SalesforceRecord& operator=(const SalesforceRecord &other) {
+        if (this != &other) {
+            if (doc) {
+                yyjson_doc_free(doc);
+            }
+            
+            // Create a deep copy of the document
+            yyjson_read_flag flags = YYJSON_READ_ALLOW_INVALID_UNICODE;
+            char *json_str = yyjson_val_write(other.root, 0, nullptr);
+            doc = yyjson_read(json_str, strlen(json_str), flags);
+            root = yyjson_doc_get_root(doc);
+            free(json_str);
+        }
+        return *this;
+    }
+    
+    // Move assignment operator
+    SalesforceRecord& operator=(SalesforceRecord &&other) noexcept {
+        if (this != &other) {
+            if (doc) {
+                yyjson_doc_free(doc);
+            }
+            
+            doc = other.doc;
+            root = other.root;
+            
+            other.doc = nullptr;
+            other.root = nullptr;
+        }
+        return *this;
+    }
+    
+    // Check if a value is null
+    bool is_null() const {
+        return root == nullptr || duckdb_yyjson::yyjson_is_null(root);
+    }
+    
+    // Get a field from the record
+    yyjson_val* operator[](const char* key) const {
+        return yyjson_obj_get(root, key);
+    }
+};
 
 // Salesforce OAuth credentials for username/password flow
 struct SalesforceCredentials {
@@ -38,87 +122,71 @@ struct SalesforceCredentials {
     time_t token_expiry = 0;
 };
 
-// Callback function for CURL to write response data
-static size_t WriteCallback(void *contents, size_t size, size_t nmemb, std::string *s) {
-    size_t newLength = size * nmemb;
-    try {
-        s->append((char*)contents, newLength);
-        return newLength;
-    } catch(std::bad_alloc &e) {
-        return 0;
-    }
-}
-
 // Function to authenticate with Salesforce using username/password flow
 static bool AuthenticateWithSalesforce(SalesforceCredentials &credentials) {
-    CURL *curl = curl_easy_init();
-    if (!curl) {
-        throw std::runtime_error("Failed to initialize CURL for authentication");
+    Client client(credentials.login_url.c_str());
+    
+    // Prepare the OAuth request using httplib's form parameters
+    Params form_params;
+    form_params.emplace("grant_type", "password");
+    form_params.emplace("client_id", credentials.client_id);
+    form_params.emplace("client_secret", credentials.client_secret);
+    form_params.emplace("username", credentials.username);
+    form_params.emplace("password", credentials.password);
+    
+    std::string url = "/services/oauth2/token";
+    
+    // Use httplib's Post method with form parameters - this will properly set Content-Type: application/x-www-form-urlencoded
+    auto res = client.Post(url.c_str(), form_params);
+    
+    if (res.error() != Error::Success) {
+        throw std::runtime_error("Failed to authenticate with Salesforce: " + std::to_string(static_cast<int>(res.error())));
     }
     
-    // Prepare the OAuth request
-    std::string post_fields = "grant_type=password";
-    
-    // Properly handle curl_easy_escape results
-    char* escaped_client_id = curl_easy_escape(curl, credentials.client_id.c_str(), credentials.client_id.length());
-    char* escaped_client_secret = curl_easy_escape(curl, credentials.client_secret.c_str(), credentials.client_secret.length());
-    char* escaped_username = curl_easy_escape(curl, credentials.username.c_str(), credentials.username.length());
-    char* escaped_password = curl_easy_escape(curl, credentials.password.c_str(), credentials.password.length());
-    
-    post_fields += "&client_id=" + std::string(escaped_client_id);
-    post_fields += "&client_secret=" + std::string(escaped_client_secret);
-    post_fields += "&username=" + std::string(escaped_username);
-    post_fields += "&password=" + std::string(escaped_password);
-    
-    // Free allocated memory
-    curl_free(escaped_client_id);
-    curl_free(escaped_client_secret);
-    curl_free(escaped_username);
-    curl_free(escaped_password);
-    
-    std::string url = credentials.login_url + "/services/oauth2/token";
-    std::string response_string;
-    
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_POST, 1L);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_fields.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_string);
-    
-    struct curl_slist *headers = NULL;
-    headers = curl_slist_append(headers, "Content-Type: application/x-www-form-urlencoded");
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    
-    CURLcode res = curl_easy_perform(curl);
-    curl_slist_free_all(headers);
-    
-    if (res != CURLE_OK) {
-        curl_easy_cleanup(curl);
-        throw std::runtime_error("Failed to authenticate with Salesforce: " + std::string(curl_easy_strerror(res)));
-    }
-    
-    long http_code = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-    curl_easy_cleanup(curl);
+    std::string response_string = res->body;
+    long http_code = res->status;
     
     if (http_code != 200) {
         throw std::runtime_error("Salesforce authentication failed with code: " + std::to_string(http_code) + 
-                                "\nRequest (" + url + "): " + post_fields +
                                 "\nResponse: " + response_string);
     }
     
     try {
-        json response = json::parse(response_string);
+        // Parse JSON using yyjson
+        yyjson_read_flag flags = YYJSON_READ_ALLOW_INVALID_UNICODE;
+        yyjson_doc *doc = yyjson_read(response_string.c_str(), response_string.size(), flags);
+        if (!doc) {
+            throw std::runtime_error("Failed to parse Salesforce authentication response");
+        }
         
-        credentials.access_token = response["access_token"];
-        credentials.instance_url = response["instance_url"];
+        yyjson_val *root = yyjson_doc_get_root(doc);
+        if (!root || duckdb_yyjson::yyjson_get_type(root) != YYJSON_TYPE_OBJ) {
+            yyjson_doc_free(doc);
+            throw std::runtime_error("Invalid JSON response from Salesforce");
+        }
+        
+        // Extract values from JSON
+        yyjson_val *access_token = yyjson_obj_get(root, "access_token");
+        yyjson_val *instance_url = yyjson_obj_get(root, "instance_url");
+        yyjson_val *refresh_token = yyjson_obj_get(root, "refresh_token");
+        
+        if (!access_token || !instance_url) {
+            yyjson_doc_free(doc);
+            throw std::runtime_error("Missing required fields in Salesforce authentication response");
+        }
+        
+        credentials.access_token = duckdb_yyjson::yyjson_get_str(access_token);
+        credentials.instance_url = duckdb_yyjson::yyjson_get_str(instance_url);
         
         // Set token expiry (typically 2 hours for Salesforce)
         credentials.token_expiry = time(nullptr) + 7200; // 2 hours
         
-        if (response.contains("refresh_token")) {
-            credentials.refresh_token = response["refresh_token"];
+        if (refresh_token) {
+            credentials.refresh_token = duckdb_yyjson::yyjson_get_str(refresh_token);
         }
+        
+        // Free the document
+        yyjson_doc_free(doc);
         
         return true;
     } catch (const std::exception &e) {
@@ -134,6 +202,17 @@ static void EnsureValidToken(SalesforceCredentials &credentials) {
     }
 }
 
+static Client GetAuthorisedClient(SalesforceCredentials &credentials) {
+    EnsureValidToken(credentials);
+    Client client(credentials.instance_url.c_str());
+    client.set_bearer_token_auth(credentials.access_token);
+    client.set_default_headers({
+        {"Content-Type", "application/json"}
+    });
+    
+    return std::move(client);
+}
+
 // Structure to hold Salesforce scan bind data
 struct SalesforceScanBindData : public TableFunctionData {
     long row_limit;
@@ -146,7 +225,7 @@ struct SalesforceScanBindData : public TableFunctionData {
 struct SalesforceScanState : public LocalTableFunctionState {
     std::vector<SalesforceField> selected_fields;
     std::string where_clause;
-    std::vector<json> records;
+    std::vector<SalesforceRecord> records;
     size_t current_row = 0;
     bool finished = false;
 };
@@ -163,36 +242,17 @@ static std::vector<SalesforceField> FetchSalesforceObjectMetadata(const std::str
     std::vector<SalesforceField> fields;
     
     // Ensure we have a valid token
-    EnsureValidToken(credentials);
+    auto client = GetAuthorisedClient(credentials);
     
-    CURL *curl = curl_easy_init();
-    if (!curl) {
-        throw std::runtime_error("Failed to initialize CURL");
+    std::string url = "/services/data/v56.0/sobjects/" + object_name + "/describe";
+    auto res = client.Get(url.c_str());
+    
+    if (res.error() != Error::Success) {
+        throw std::runtime_error("Failed to fetch Salesforce object metadata: " + std::to_string(static_cast<int>(res.error())));
     }
     
-    std::string url = credentials.instance_url + "/services/data/v56.0/sobjects/" + object_name + "/describe";
-    std::string response_string;
-    
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_string);
-    
-    struct curl_slist *headers = NULL;
-    headers = curl_slist_append(headers, ("Authorization: Bearer " + credentials.access_token).c_str());
-    headers = curl_slist_append(headers, "Content-Type: application/json");
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    
-    CURLcode res = curl_easy_perform(curl);
-    curl_slist_free_all(headers);
-    
-    if (res != CURLE_OK) {
-        curl_easy_cleanup(curl);
-        throw std::runtime_error("Failed to fetch Salesforce object metadata: " + std::string(curl_easy_strerror(res)));
-    }
-    
-    long http_code = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-    curl_easy_cleanup(curl);
+    std::string response_string = res->body;
+    long http_code = res->status;
     
     if (http_code == 401) {
         // Token expired, refresh and try again
@@ -203,15 +263,51 @@ static std::vector<SalesforceField> FetchSalesforceObjectMetadata(const std::str
     }
     
     try {
-        json response = json::parse(response_string);
-        for (const auto &field : response["fields"]) {
-            SalesforceField sf_field;
-            sf_field.name = field["name"];
-            sf_field.type = field["type"];
-            sf_field.nillable = field["nillable"];
-            sf_field.duckdb_type = MapSalesforceType(sf_field.type);
-            fields.push_back(sf_field);
+        // Parse JSON using yyjson
+        yyjson_read_flag flags = YYJSON_READ_ALLOW_INVALID_UNICODE;
+        yyjson_doc *doc = yyjson_read(response_string.c_str(), response_string.size(), flags);
+        if (!doc) {
+            throw std::runtime_error("Failed to parse Salesforce metadata response");
         }
+        
+        yyjson_val *root = yyjson_doc_get_root(doc);
+        if (!root || duckdb_yyjson::yyjson_get_type(root) != YYJSON_TYPE_OBJ) {
+            yyjson_doc_free(doc);
+            throw std::runtime_error("Invalid JSON response from Salesforce");
+        }
+        
+        // Get the fields array
+        yyjson_val *fields_arr = yyjson_obj_get(root, "fields");
+        if (!fields_arr || duckdb_yyjson::yyjson_get_type(fields_arr) != YYJSON_TYPE_ARR) {
+            yyjson_doc_free(doc);
+            throw std::runtime_error("Missing or invalid 'fields' array in Salesforce metadata response");
+        }
+        
+        // Iterate through fields
+        size_t idx, max;
+        yyjson_val *field;
+        yyjson_arr_foreach(fields_arr, idx, max, field) {
+            if (duckdb_yyjson::yyjson_get_type(field) != YYJSON_TYPE_OBJ) {
+                continue;
+            }
+            
+            SalesforceField sf_field;
+            
+            yyjson_val *name = yyjson_obj_get(field, "name");
+            yyjson_val *type = yyjson_obj_get(field, "type");
+            yyjson_val *nillable = yyjson_obj_get(field, "nillable");
+            
+            if (name && type) {
+                sf_field.name = duckdb_yyjson::yyjson_get_str(name);
+                sf_field.type = duckdb_yyjson::yyjson_get_str(type);
+                sf_field.nillable = nillable ? duckdb_yyjson::yyjson_get_bool(nillable) : false;
+                sf_field.duckdb_type = MapSalesforceType(sf_field.type);
+                fields.push_back(sf_field);
+            }
+        }
+        
+        // Free the document
+        yyjson_doc_free(doc);
         
         // Add metadata to cache
         cache->AddToCache(object_name, fields);
@@ -222,51 +318,84 @@ static std::vector<SalesforceField> FetchSalesforceObjectMetadata(const std::str
     return fields;
 }
 
+// Helper function to process Salesforce API response and extract records
+static std::pair<std::vector<SalesforceRecord>, std::string> ProcessSalesforceResponse(
+    const std::string &response_string, 
+    yyjson_read_flag flags) {
+    
+    std::vector<SalesforceRecord> records;
+    std::string next_records_url = "";
+    
+    // Parse JSON using yyjson
+    yyjson_doc *doc = yyjson_read(response_string.c_str(), response_string.size(), flags);
+    if (!doc) {
+        throw std::runtime_error("Failed to parse Salesforce response");
+    }
+    
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    if (!root || duckdb_yyjson::yyjson_get_type(root) != YYJSON_TYPE_OBJ) {
+        yyjson_doc_free(doc);
+        throw std::runtime_error("Invalid JSON response from Salesforce");
+    }
+    
+    // Get the records array
+    yyjson_val *records_arr = yyjson_obj_get(root, "records");
+    if (!records_arr || duckdb_yyjson::yyjson_get_type(records_arr) != YYJSON_TYPE_ARR) {
+        yyjson_doc_free(doc);
+        throw std::runtime_error("Missing or invalid 'records' array in Salesforce response");
+    }
+    
+    // Add records
+    size_t idx, max;
+    yyjson_val *record;
+    yyjson_arr_foreach(records_arr, idx, max, record) {
+        // For each record, create a new document to ensure independent lifecycle
+        char *record_str = yyjson_val_write(record, 0, nullptr);
+        yyjson_doc *record_doc = yyjson_read(record_str, strlen(record_str), flags);
+        free(record_str);
+        
+        if (record_doc) {
+            yyjson_val *record_root = yyjson_doc_get_root(record_doc);
+            records.emplace_back(record_doc, record_root);
+        }
+    }
+    
+    // Get URL for next page, if any
+    yyjson_val *next_records_url_val = yyjson_obj_get(root, "nextRecordsUrl");
+    if (next_records_url_val && duckdb_yyjson::yyjson_is_str(next_records_url_val)) {
+        next_records_url = duckdb_yyjson::yyjson_get_str(next_records_url_val);
+    }
+    
+    // Free the document as we've copied the records we need
+    yyjson_doc_free(doc);
+    
+    return {records, next_records_url};
+}
+
 // Function to execute SOQL query against Salesforce
-static std::vector<json> ExecuteSalesforceQuery(const std::string &query, SalesforceCredentials &credentials) {
-    std::vector<json> records;
+static std::vector<SalesforceRecord> ExecuteSalesforceQuery(const std::string &query, SalesforceCredentials &credentials) {
+    std::vector<SalesforceRecord> records;
     
     // Ensure we have a valid token
-    EnsureValidToken(credentials);
+    auto client = GetAuthorisedClient(credentials);
     
-    CURL *curl = curl_easy_init();
-    if (!curl) {
-        throw std::runtime_error("Failed to initialize CURL");
+    // Use httplib's query parameter handling
+    std::string url = "/services/data/v56.0/query";
+    Params params;
+    params.emplace("q", query);
+    
+    // Create empty headers - the GetAuthorisedClient already set default headers
+    Headers headers;
+    
+    // Use httplib's Get method with query parameters and empty headers
+    auto res = client.Get(url.c_str(), params, headers);
+    
+    if (res.error() != Error::Success) {
+        throw std::runtime_error("Failed to execute Salesforce query: " + std::to_string(static_cast<int>(res.error())));
     }
     
-    std::string encoded_query;
-    char *encoded = curl_easy_escape(curl, query.c_str(), query.length());
-    if (encoded) {
-        encoded_query = encoded;
-        curl_free(encoded);
-    } else {
-        curl_easy_cleanup(curl);
-        throw std::runtime_error("Failed to URL encode SOQL query");
-    }
-    
-    std::string url = credentials.instance_url + "/services/data/v56.0/query?q=" + encoded_query;
-    std::string response_string;
-    
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_string);
-    
-    struct curl_slist *headers = NULL;
-    headers = curl_slist_append(headers, ("Authorization: Bearer " + credentials.access_token).c_str());
-    headers = curl_slist_append(headers, "Content-Type: application/json");
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    
-    CURLcode res = curl_easy_perform(curl);
-    curl_slist_free_all(headers);
-    
-    if (res != CURLE_OK) {
-        curl_easy_cleanup(curl);
-        throw std::runtime_error("Failed to execute Salesforce query: " + std::string(curl_easy_strerror(res)));
-    }
-    
-    long http_code = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-    curl_easy_cleanup(curl);
+    std::string response_string = res->body;
+    long http_code = res->status;
     
     if (http_code == 401) {
         // Token expired, refresh and try again
@@ -277,57 +406,39 @@ static std::vector<json> ExecuteSalesforceQuery(const std::string &query, Salesf
     }
     
     try {
-        json response = json::parse(response_string);
-        for (const auto &record : response["records"]) {
-            records.push_back(record);
-        }
+        // Set up flags for yyjson
+        yyjson_read_flag flags = YYJSON_READ_ALLOW_INVALID_UNICODE;
+        
+        // Process the initial response
+        auto [initial_records, next_records_url] = ProcessSalesforceResponse(response_string, flags);
+        records.insert(records.end(), initial_records.begin(), initial_records.end());
         
         // Handle pagination if needed
-        std::string next_records_url = response.value("nextRecordsUrl", "");
         while (!next_records_url.empty()) {
-            CURL *next_curl = curl_easy_init();
-            if (!next_curl) {
-                throw std::runtime_error("Failed to initialize CURL for pagination");
+            auto next_client = GetAuthorisedClient(credentials);
+            
+            // Use httplib's Get method directly with the next_records_url
+            auto next_res = next_client.Get(next_records_url.c_str());
+            
+            if (next_res.error() != Error::Success) {
+                throw std::runtime_error("Failed to fetch next page: " + std::to_string(static_cast<int>(next_res.error())));
             }
             
-            std::string next_url = credentials.instance_url + next_records_url;
-            std::string next_response_string;
-            
-            curl_easy_setopt(next_curl, CURLOPT_URL, next_url.c_str());
-            curl_easy_setopt(next_curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-            curl_easy_setopt(next_curl, CURLOPT_WRITEDATA, &next_response_string);
-            
-            struct curl_slist *next_headers = NULL;
-            next_headers = curl_slist_append(next_headers, ("Authorization: Bearer " + credentials.access_token).c_str());
-            next_headers = curl_slist_append(next_headers, "Content-Type: application/json");
-            curl_easy_setopt(next_curl, CURLOPT_HTTPHEADER, next_headers);
-            
-            res = curl_easy_perform(next_curl);
-            curl_slist_free_all(next_headers);
-            
-            if (res != CURLE_OK) {
-                curl_easy_cleanup(next_curl);
-                throw std::runtime_error("Failed to fetch next page: " + std::string(curl_easy_strerror(res)));
-            }
-            
-            long next_http_code = 0;
-            curl_easy_getinfo(next_curl, CURLINFO_RESPONSE_CODE, &next_http_code);
-            curl_easy_cleanup(next_curl);
+            std::string next_response_string = next_res->body;
+            long next_http_code = next_res->status;
             
             if (next_http_code == 401) {
-                // Token expired, refresh and try again with the original query
                 AuthenticateWithSalesforce(credentials);
-                return ExecuteSalesforceQuery(query, credentials);
+                continue;
             } else if (next_http_code != 200) {
-                throw std::runtime_error("Salesforce API returned error code for pagination: " + std::to_string(next_http_code));
+                throw std::runtime_error("Salesforce API returned error code: " + std::to_string(next_http_code) + 
+                                        "\nResponse: " + next_response_string);
             }
             
-            json next_response = json::parse(next_response_string);
-            for (const auto &record : next_response["records"]) {
-                records.push_back(record);
-            }
-            
-            next_records_url = next_response.value("nextRecordsUrl", "");
+            // Process the next page response
+            auto [page_records, new_next_url] = ProcessSalesforceResponse(next_response_string, flags);
+            records.insert(records.end(), page_records.begin(), page_records.end());
+            next_records_url = new_next_url;
         }
     } catch (const std::exception &e) {
         throw std::runtime_error("Failed to parse Salesforce query response: " + std::string(e.what()));
@@ -337,42 +448,68 @@ static std::vector<json> ExecuteSalesforceQuery(const std::string &query, Salesf
 }
 
 // Convert Salesforce value to DuckDB value
-static Value ConvertSalesforceValue(const json &value, const LogicalType &type, const std::string &field_name) {
-    if (value.is_null()) {
+static Value ConvertSalesforceValue(yyjson_val *value, const LogicalType &type, const std::string &field_name) {
+    if (!value || duckdb_yyjson::yyjson_is_null(value)) {
         return Value(type);
     }
     
     switch (type.id()) {
         case LogicalTypeId::VARCHAR:
-            return Value(value.get<std::string>());
-        case LogicalTypeId::BOOLEAN:
-            return Value::BOOLEAN(value.get<bool>());
-        case LogicalTypeId::INTEGER:
-            return Value::INTEGER(value.get<int32_t>());
-        case LogicalTypeId::DOUBLE:
-            return Value::DOUBLE(value.get<double>());   
-        case LogicalTypeId::DATE: {
-            std::string date_str = value.get<std::string>();
-            date_t date_val;
-            bool special;
-            idx_t pos = 0;
-            DateCastResult result = Date::TryConvertDate(date_str.c_str(), date_str.length(), pos, date_val, special);
-            if (result != DateCastResult::SUCCESS) {
-                throw std::runtime_error("Failed to convert Salesforce date value: " + date_str);
+            if (duckdb_yyjson::yyjson_is_str(value)) {
+                return Value(duckdb_yyjson::yyjson_get_str(value));
             }
-            return Value::DATE(date_val);
+            throw std::runtime_error("Expected string value for field: " + field_name);
+        case LogicalTypeId::BOOLEAN:
+            if (duckdb_yyjson::yyjson_is_bool(value)) {
+                return Value::BOOLEAN(duckdb_yyjson::yyjson_get_bool(value));
+            }
+            throw std::runtime_error("Expected boolean value for field: " + field_name);
+        case LogicalTypeId::INTEGER:
+            if (duckdb_yyjson::yyjson_is_int(value)) {
+                return Value::INTEGER((int32_t)duckdb_yyjson::yyjson_get_int(value));
+            }
+            throw std::runtime_error("Expected integer value for field: " + field_name);
+        case LogicalTypeId::DOUBLE:
+            if (duckdb_yyjson::yyjson_is_num(value)) {
+                return Value::DOUBLE(duckdb_yyjson::yyjson_get_num(value));
+            }
+            throw std::runtime_error("Expected numeric value for field: " + field_name);
+        case LogicalTypeId::DATE: {
+            if (duckdb_yyjson::yyjson_is_str(value)) {
+                std::string date_str = duckdb_yyjson::yyjson_get_str(value);
+                date_t date_val;
+                bool special;
+                idx_t pos = 0;
+                DateCastResult result = Date::TryConvertDate(date_str.c_str(), date_str.length(), pos, date_val, special);
+                if (result != DateCastResult::SUCCESS) {
+                    throw std::runtime_error("Failed to convert Salesforce date value: " + date_str);
+                }
+                return Value::DATE(date_val);
+            }
+            throw std::runtime_error("Expected string date value for field: " + field_name);
         }
         case LogicalTypeId::TIMESTAMP: {
-            std::string ts_str = value.get<std::string>();
-            timestamp_t ts_val;
-            TimestampCastResult result = Timestamp::TryConvertTimestamp(ts_str.c_str(), ts_str.length(), ts_val);
-            if (result != TimestampCastResult::SUCCESS) {
-                throw std::runtime_error("Failed to convert Salesforce timestamp value: " + ts_str);
+            if (duckdb_yyjson::yyjson_is_str(value)) {
+                std::string ts_str = duckdb_yyjson::yyjson_get_str(value);
+                timestamp_t ts_val;
+                TimestampCastResult result = Timestamp::TryConvertTimestamp(ts_str.c_str(), ts_str.length(), ts_val);
+                if (result != TimestampCastResult::SUCCESS) {
+                    throw std::runtime_error("Failed to convert Salesforce timestamp value: " + ts_str);
+                }
+                return Value::TIMESTAMP(ts_val);
             }
-            return Value::TIMESTAMP(ts_val);
+            throw std::runtime_error("Expected string timestamp value for field: " + field_name);
         }       
         default:
-            return Value(value.get<std::string>());
+            if (duckdb_yyjson::yyjson_is_str(value)) {
+                return Value(duckdb_yyjson::yyjson_get_str(value));
+            } else if (duckdb_yyjson::yyjson_is_num(value)) {
+                return Value(std::to_string(duckdb_yyjson::yyjson_get_num(value)));
+            } else if (duckdb_yyjson::yyjson_is_bool(value)) {
+                return Value(duckdb_yyjson::yyjson_get_bool(value) ? "true" : "false");
+            } else {
+                return Value(type); // Return NULL for unsupported types
+            }
     }
 }
 
@@ -452,15 +589,16 @@ static void SalesforceObjectScan(ClientContext &context, TableFunctionInput &dat
             try {
                 // Handle nested fields (e.g., Owner.Name)
                 std::string field_name = field.name;
-                json field_value = record;
+                yyjson_val *field_value = record.root;
                 
                 size_t dot_pos = field_name.find('.');
                 while (dot_pos != std::string::npos) {
                     std::string parent = field_name.substr(0, dot_pos);
                     field_name = field_name.substr(dot_pos + 1);
                     
-                    if (field_value.contains(parent) && !field_value[parent].is_null()) {
-                        field_value = field_value[parent];
+                    yyjson_val *parent_val = yyjson_obj_get(field_value, parent.c_str());
+                    if (parent_val && !duckdb_yyjson::yyjson_is_null(parent_val)) {
+                        field_value = parent_val;
                     } else {
                         // Parent field is null or doesn't exist
                         field_value = nullptr;
@@ -470,8 +608,9 @@ static void SalesforceObjectScan(ClientContext &context, TableFunctionInput &dat
                     dot_pos = field_name.find('.');
                 }
                 
-                if (!field_value.is_null() && field_value.contains(field_name)) {
-                    column.SetValue(row_idx, ConvertSalesforceValue(field_value[field_name], field.duckdb_type, field.name));
+                if (field_value) {
+                    yyjson_val *field_val = yyjson_obj_get(field_value, field_name.c_str());
+                    column.SetValue(row_idx, ConvertSalesforceValue(field_val, field.duckdb_type, field.name));
                 } else {
                     column.SetValue(row_idx, Value(field.duckdb_type));
                 }
