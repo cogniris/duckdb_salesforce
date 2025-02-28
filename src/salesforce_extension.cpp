@@ -8,7 +8,7 @@
 #include "duckdb/main/extension_util.hpp"
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 #include "salesforce_object.hpp"
-
+#include "salesforce_secret.hpp"
 // OpenSSL linked through vcpkg
 #include <openssl/opensslv.h>
 
@@ -35,6 +35,9 @@ inline void SalesforceOpenSSLVersionScalarFun(DataChunk &args, ExpressionState &
 }
 
 static void LoadInternal(DatabaseInstance &instance) {
+	// Load Secret functions
+	CreateSalesforceSecretFunctions::Register(instance);
+
     // Register a scalar function
     auto salesforce_scalar_function = ScalarFunction("salesforce", {LogicalType::VARCHAR}, LogicalType::VARCHAR, SalesforceScalarFun);
     ExtensionUtil::RegisterFunction(instance, salesforce_scalar_function);
