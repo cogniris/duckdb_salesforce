@@ -21,6 +21,7 @@ set(EXTENSION_SOURCES
     src/salesforce_extension.cpp
     src/salesforce_object.cpp
     src/salesforce_metadata_cache.cpp
+    src/salesforce_secret.cpp
 )
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})

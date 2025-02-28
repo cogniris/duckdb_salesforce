@@ -5,6 +5,7 @@
 #include "duckdb/common/types/date.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/planner/filter/optional_filter.hpp"
+#include "duckdb/main/secret/secret_manager.hpp"
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -105,15 +106,15 @@ struct SalesforceRecord {
 // Salesforce OAuth credentials for username/password flow
 struct SalesforceCredentials {
     // OAuth client credentials
-    std::string client_id = "";
-    std::string client_secret = "";
+    std::string client_id; 
+    std::string client_secret; 
     
     // User credentials
-    std::string username = "";
-    std::string password = "";
+    std::string username;
+    std::string password;
     
     // OAuth endpoints
-    std::string login_url = "https://test.salesforce.com";
+    std::string login_url = "https://login.salesforce.com";
     
     // Token information (will be populated during authentication)
     std::string access_token;
@@ -216,6 +217,7 @@ static Client GetAuthorisedClient(SalesforceCredentials &credentials) {
 // Structure to hold Salesforce scan bind data
 struct SalesforceScanBindData : public TableFunctionData {
     long row_limit;
+    std::string org_secret_name;
     std::string table_name;
     std::vector<SalesforceField> fields;
     SalesforceCredentials credentials;
@@ -636,11 +638,79 @@ static unique_ptr<FunctionData> SalesforceObjectBind(ClientContext &context, Tab
     auto bind_data = make_uniq<SalesforceScanBindData>();
     
     // Get the object name from the input
-    bind_data->table_name = input.inputs[0].GetValue<string>();
-    bind_data->row_limit = input.inputs[1].GetValue<u_int32_t>();
+    bind_data->org_secret_name = input.inputs[0].GetValue<string>();
+    bind_data->table_name = input.inputs[1].GetValue<string>();
 
-    // Set up credentials
+    for (auto &kv : input.named_parameters) {
+        if (kv.first == "row_limit") {
+            try {
+                bind_data->row_limit = kv.second.GetValue<u_int32_t>();
+            } catch (const std::exception& e) {
+                throw InvalidInputException("Invalid value for 'row_limit' parameter. Expected an integer value.");
+            }
+        }
+    }
+
+    auto &secret_manager = SecretManager::Get(context);
+    auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
+    auto secret_match = secret_manager.LookupSecret(transaction, bind_data->org_secret_name, "salesforce");
+    
+    if (!secret_match.HasMatch()) {
+        throw InvalidInputException("No 'salesforce' secret found for '%s'. Please create a secret with 'CREATE SECRET' first.", bind_data->org_secret_name);
+    }
+
+    auto &secret = secret_match.GetSecret();
+    if (secret.GetType() != "salesforce") {
+        throw InvalidInputException("Invalid secret type. Expected 'salesforce', got '%s'", secret.GetType());
+    }
+    if (secret.GetProvider() != "access_token") {
+        throw InvalidInputException("Invalid secret provider. Expected 'access_token', got '%s'", secret.GetProvider());
+    }
+
+    const auto *kv_secret = dynamic_cast<const KeyValueSecret*>(&secret);
+    if (!kv_secret) {
+        throw InvalidInputException("Invalid secret format for 'salesforce' secret");
+    }
+
+    // create Salesforce credentials from secret
     bind_data->credentials = SalesforceCredentials();
+
+    Value secretValue;
+    if (kv_secret->TryGetValue("login_url", secretValue)) {
+        bind_data->credentials.login_url = secretValue.ToString();
+    }
+    if (kv_secret->TryGetValue("client_id", secretValue)) {
+        bind_data->credentials.client_id = secretValue.ToString();
+    } else {    
+        throw InvalidInputException("Missing 'client_id' parameter in 'salesforce' secret");
+    }
+    if (kv_secret->TryGetValue("client_secret", secretValue)) {
+        bind_data->credentials.client_secret = secretValue.ToString();
+    } else {
+        throw InvalidInputException("Missing 'client_secret' parameter in 'salesforce' secret");
+    }
+    if (kv_secret->TryGetValue("username", secretValue)) {
+        bind_data->credentials.username = secretValue.ToString();
+    } else {
+        throw InvalidInputException("Missing 'username' parameter in 'salesforce' secret");
+    }
+    if (kv_secret->TryGetValue("password", secretValue)) {
+        bind_data->credentials.password = secretValue.ToString();
+    } else {
+        throw InvalidInputException("Missing 'password' parameter in 'salesforce' secret");
+    }
+    if (kv_secret->TryGetValue("access_token", secretValue)) {
+        bind_data->credentials.access_token = secretValue.ToString();
+    }
+    if (kv_secret->TryGetValue("instance_url", secretValue)) {
+        bind_data->credentials.instance_url = secretValue.ToString();
+    }
+    if (kv_secret->TryGetValue("refresh_token", secretValue)) {
+        bind_data->credentials.refresh_token = secretValue.ToString();
+    }
+    if (kv_secret->TryGetValue("token_expiry", secretValue)) {
+        bind_data->credentials.token_expiry = secretValue.GetValue<u_int32_t>();
+    }
     
     try {
         // Fetch metadata for the object
@@ -748,11 +818,12 @@ static unique_ptr<LocalTableFunctionState> SalesforceObjectInitLocalState(Execut
 
 SalesforceObjectFunction::SalesforceObjectFunction() 
     : TableFunction(
-        "salesforce_object", {LogicalType::VARCHAR, LogicalType::INTEGER}, 
+        "salesforce_object", {LogicalType::VARCHAR, LogicalType::VARCHAR}, 
         SalesforceObjectScan, SalesforceObjectBind, 
         SalesforceObjectInitGlobalState, SalesforceObjectInitLocalState) {
     this->projection_pushdown = true;
     this->filter_pushdown = true;
+    this->named_parameters["row_limit"] = LogicalType::INTEGER;
 }
 
 } // namespace duckdb 
