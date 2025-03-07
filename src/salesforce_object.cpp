@@ -74,12 +74,30 @@ struct SalesforceRecord {
     
     // Copy constructor
     SalesforceRecord(const SalesforceRecord &other) {
+        if (!other.doc || !other.root) {
+            doc = nullptr;
+            root = nullptr;
+            return;
+        }
+        
         // Create a deep copy of the document
         yyjson_read_flag flags = YYJSON_READ_ALLOW_INVALID_UNICODE;
         char *json_str = yyjson_val_write(other.root, 0, nullptr);
+        if (!json_str) {
+            doc = nullptr;
+            root = nullptr;
+            return;
+        }
+        
         doc = yyjson_read(json_str, strlen(json_str), flags);
-        root = yyjson_doc_get_root(doc);
         free(json_str);
+        
+        if (!doc) {
+            root = nullptr;
+            return;
+        }
+        
+        root = yyjson_doc_get_root(doc);
     }
     
     // Move constructor
@@ -95,12 +113,30 @@ struct SalesforceRecord {
                 yyjson_doc_free(doc);
             }
             
+            if (!other.doc || !other.root) {
+                doc = nullptr;
+                root = nullptr;
+                return *this;
+            }
+            
             // Create a deep copy of the document
             yyjson_read_flag flags = YYJSON_READ_ALLOW_INVALID_UNICODE;
             char *json_str = yyjson_val_write(other.root, 0, nullptr);
+            if (!json_str) {
+                doc = nullptr;
+                root = nullptr;
+                return *this;
+            }
+            
             doc = yyjson_read(json_str, strlen(json_str), flags);
-            root = yyjson_doc_get_root(doc);
             free(json_str);
+            
+            if (!doc) {
+                root = nullptr;
+                return *this;
+            }
+            
+            root = yyjson_doc_get_root(doc);
         }
         return *this;
     }
@@ -135,8 +171,12 @@ struct SalesforceRecord {
 // Structure to hold Salesforce scan state
 struct SalesforceScanState : public LocalTableFunctionState {
     std::vector<SalesforceField> selected_fields;
+    bool count_only = false;
     std::string where_clause;
     std::vector<SalesforceRecord> records;
+    std::string next_records_url;
+    size_t current_record_idx = 0;
+    size_t current_chunk_idx = 0;
     size_t current_row = 0;
     bool finished = false;
 };
@@ -229,7 +269,7 @@ static Client GetAuthorisedClient(SalesforceCredentials &credentials) {
         {"Content-Type", "application/json"}
     });
     
-    return std::move(client);
+    return client;
 }
 
 // Salesforce data type mapping to DuckDB types
@@ -344,14 +384,13 @@ static std::vector<SalesforceField> FetchSalesforceObjectMetadata(const std::str
 
 // Helper function to process Salesforce API response and extract records
 static std::pair<std::vector<SalesforceRecord>, std::string> ProcessSalesforceResponse(
-    const std::string &response_string, 
-    yyjson_read_flag flags) {
+    const std::string &response_string) {
     
     std::vector<SalesforceRecord> records;
     std::string next_records_url = "";
     
     // Parse JSON using yyjson
-    yyjson_doc *doc = yyjson_read(response_string.c_str(), response_string.size(), flags);
+    yyjson_doc *doc = yyjson_read(response_string.c_str(), response_string.size(), YYJSON_READ_ALLOW_INVALID_UNICODE);
     if (!doc) {
         throw std::runtime_error("Failed to parse Salesforce response");
     }
@@ -375,7 +414,7 @@ static std::pair<std::vector<SalesforceRecord>, std::string> ProcessSalesforceRe
     yyjson_arr_foreach(records_arr, idx, max, record) {
         // For each record, create a new document to ensure independent lifecycle
         char *record_str = yyjson_val_write(record, 0, nullptr);
-        yyjson_doc *record_doc = yyjson_read(record_str, strlen(record_str), flags);
+        yyjson_doc *record_doc = yyjson_read(record_str, strlen(record_str), YYJSON_READ_ALLOW_INVALID_UNICODE);
         free(record_str);
         
         if (record_doc) {
@@ -397,9 +436,10 @@ static std::pair<std::vector<SalesforceRecord>, std::string> ProcessSalesforceRe
 }
 
 // Function to execute SOQL query against Salesforce
-static std::vector<SalesforceRecord> ExecuteSalesforceQuery(const std::string &query, SalesforceCredentials &credentials) {
-    std::vector<SalesforceRecord> records;
-    
+static std::pair<std::vector<SalesforceRecord>, std::string> ExecuteSalesforceQuery(
+    const std::string &query, 
+    SalesforceCredentials &credentials) {
+
     // Ensure we have a valid token
     auto client = GetAuthorisedClient(credentials);
     
@@ -430,45 +470,38 @@ static std::vector<SalesforceRecord> ExecuteSalesforceQuery(const std::string &q
     }
     
     try {
-        // Set up flags for yyjson
-        yyjson_read_flag flags = YYJSON_READ_ALLOW_INVALID_UNICODE;
-        
-        // Process the initial response
-        auto [initial_records, next_records_url] = ProcessSalesforceResponse(response_string, flags);
-        records.insert(records.end(), initial_records.begin(), initial_records.end());
-        
-        // Handle pagination if needed
-        while (!next_records_url.empty()) {
-            auto next_client = GetAuthorisedClient(credentials);
-            
-            // Use httplib's Get method directly with the next_records_url
-            auto next_res = next_client.Get(next_records_url.c_str());
-            
-            if (next_res.error() != Error::Success) {
-                throw std::runtime_error("Failed to fetch next page: " + std::to_string(static_cast<int>(next_res.error())));
-            }
-            
-            std::string next_response_string = next_res->body;
-            long next_http_code = next_res->status;
-            
-            if (next_http_code == 401) {
-                AuthenticateWithSalesforce(credentials);
-                continue;
-            } else if (next_http_code != 200) {
-                throw std::runtime_error("Salesforce API returned error code: " + std::to_string(next_http_code) + 
-                                        "\nResponse: " + next_response_string);
-            }
-            
-            // Process the next page response
-            auto [page_records, new_next_url] = ProcessSalesforceResponse(next_response_string, flags);
-            records.insert(records.end(), page_records.begin(), page_records.end());
-            next_records_url = new_next_url;
-        }
+        return ProcessSalesforceResponse(response_string);
     } catch (const std::exception &e) {
         throw std::runtime_error("Failed to parse Salesforce query response: " + std::string(e.what()));
     }
+}
+
+static std::pair<std::vector<SalesforceRecord>, std::string> ContinueSalesforceQuery(
+    const std::string &next_records_url, 
+    SalesforceCredentials &credentials) {
+
+    auto client = GetAuthorisedClient(credentials);
     
-    return records;
+    auto res = client.Get(next_records_url.c_str());    
+    if (res.error() != Error::Success) {
+        throw std::runtime_error("Failed to continue Salesforce query: " + std::to_string(static_cast<int>(res.error())));
+    }
+    
+    std::string response_string = res->body;
+    long http_code = res->status;   
+    
+    if (http_code == 401) {
+        AuthenticateWithSalesforce(credentials);
+        return ContinueSalesforceQuery(next_records_url, credentials);
+    } else if (http_code != 200) {
+        throw std::runtime_error("Salesforce API returned error code: " + std::to_string(http_code) + "\nResponse: " + response_string);
+    }
+    
+    try {
+        return ProcessSalesforceResponse(response_string);
+    } catch (const std::exception &e) {
+        throw std::runtime_error("Failed to parse Salesforce query response: " + std::string(e.what()));
+    }
 }
 
 // Convert Salesforce value to DuckDB value
@@ -491,6 +524,11 @@ static Value ConvertSalesforceValue(yyjson_val *value, const LogicalType &type, 
         case LogicalTypeId::INTEGER:
             if (yyjson_is_int(value)) {
                 return Value::INTEGER((int32_t)yyjson_get_int(value));
+            }
+            throw std::runtime_error("Expected integer value for field: " + field_name);
+        case LogicalTypeId::BIGINT:
+            if (yyjson_is_int(value)) {
+                return Value::BIGINT((int64_t)yyjson_get_int(value));
             }
             throw std::runtime_error("Expected integer value for field: " + field_name);
         case LogicalTypeId::DOUBLE:
@@ -537,109 +575,125 @@ static Value ConvertSalesforceValue(yyjson_val *value, const LogicalType &type, 
     }
 }
 
-static void SalesforceObjectScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
-    auto &bind_data = (SalesforceScanBindData &)*data.bind_data;
-    auto &state = (SalesforceScanState &)*data.local_state;
+static void WriteRecordsToOutput(SalesforceScanState &state, DataChunk &output) {
+    if (state.records.empty()) {
+        return;
+    }
 
-    // Better approach?
-    // write converted results to output as we go. Track count written. Hold required state to issue next API request in state.
-    // Issue API request when we have STANDARD_VECTOR_SIZE rows to output.
-    // Keep going until we have no more rows to process.
-    // Work by row then column rather than column then row.
-    // avoid holding all results in memory, write directly to output as we go.
-    
-    if (state.finished) {
+    size_t count = std::min((idx_t)(state.records.size() - state.current_record_idx), (idx_t)(STANDARD_VECTOR_SIZE - state.current_chunk_idx));
+    if (count == 0) {
         return;
     }
     
-    // Set the output size to 0 initially
-    output.SetCardinality(0);
-    
-    if (state.records.empty()) {
-        // Build SOQL query
-        std::stringstream soql;
-        soql << "SELECT ";
-        
-        // Add selected fields or all fields if none specified
-        if (state.selected_fields.empty()) {
-            bool first = true;
-            for (const auto &field : bind_data.fields) {
-                if (!first) soql << ", ";
-                soql << field.name;
-                first = false;
-            }
-        } else {
-            bool first = true;
-            for (const auto &field : state.selected_fields) {
-                if (!first) soql << ", ";
-                soql << field.name;
-                first = false;
-            }
-        }
-        
-        soql << " FROM " << bind_data.table_name;
-        
-        // Add WHERE clause if provided
-        if (!state.where_clause.empty()) {
-            soql << " WHERE " << state.where_clause;
-        }
-
-        if (bind_data.row_limit > 0) {
-            soql << " LIMIT " << bind_data.row_limit;
-        }
-        
-        // Execute the query
-        try {
-            state.records = ExecuteSalesforceQuery(soql.str(), bind_data.credentials);
-        } catch (const std::exception &e) {
-            throw std::runtime_error("Failed to execute Salesforce query: " + std::string(e.what()));
-        }
-    }
-    
-    // If no records, we're done
-    if (state.records.empty()) {
-        state.finished = true;
-        return;
-    }
-    
-    // Determine how many records to process in this chunk
-    idx_t count = std::min((idx_t)(state.records.size() - state.current_row), (idx_t)STANDARD_VECTOR_SIZE);
-    
-    // Set the output cardinality
-    output.SetCardinality(count);
-
-    auto &fields = state.selected_fields.empty() ? bind_data.fields : state.selected_fields;
-    
-    // Process each column
     for (idx_t col_idx = 0; col_idx < output.ColumnCount(); col_idx++) {
         auto &column = output.data[col_idx];
-        auto &field = fields[col_idx];
+        auto &field = state.selected_fields[col_idx];
         
         // Process each row in the chunk
         for (idx_t row_idx = 0; row_idx < count; row_idx++) {
-            const auto &record = state.records[state.current_row + row_idx];
+            const idx_t recordIndex = state.current_record_idx + row_idx;
+            const idx_t outputIndex = state.current_chunk_idx + row_idx;
+            
+            const auto &record = state.records[recordIndex];
             
             try {
                 yyjson_val *field_value = record.root;
                 
                 if (field_value) {
                     yyjson_val *field_val = yyjson_obj_get(field_value, field.name.c_str());
-                    column.SetValue(row_idx, ConvertSalesforceValue(field_val, field.duckdb_type, field.name));
+                    column.SetValue(outputIndex, ConvertSalesforceValue(field_val, field.duckdb_type, field.name));
                 } else {
-                    column.SetValue(row_idx, Value(field.duckdb_type));
+                    column.SetValue(outputIndex, Value(field.duckdb_type));
                 }
             } catch (const std::exception &e) {
                 // If conversion fails, set to NULL
-                column.SetValue(row_idx, Value(field.duckdb_type));
+                column.SetValue(outputIndex, Value(field.duckdb_type));
             }
         }
     }
+
+    state.current_chunk_idx += count;
+
+    state.current_record_idx += count;
+    if (state.current_record_idx >= state.records.size()) {
+        state.current_record_idx = 0;
+        state.records.clear();
+    }       
+}
+
+static std::string GenerateSOQLQuery(const SalesforceScanState &state, const SalesforceScanBindData &bind_data) {
+    std::stringstream soql;
+    soql << "SELECT ";
+
+    if (state.count_only) {
+        soql << "COUNT(Id) ";
+    } else {
+        auto first = true;
+        for (const auto &field : state.selected_fields) {
+            if (!first) soql << ", ";
+            soql << field.name;
+            first = false;
+        }
+    }
     
-    // Update the current row
-    state.current_row += count;
+    soql << " FROM " << bind_data.table_name;
     
-    // Check if we've processed all records
-    if (state.current_row >= state.records.size()) {
+    // Add WHERE clause if provided
+    if (!state.where_clause.empty()) {
+        soql << " WHERE " << state.where_clause;
+    }
+
+    if (bind_data.row_limit > 0) {
+        soql << " LIMIT " << bind_data.row_limit;
+    }
+
+    return soql.str();
+}
+
+static void SalesforceObjectScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+    auto &bind_data = (SalesforceScanBindData &)*data.bind_data;
+    auto &state = (SalesforceScanState &)*data.local_state;
+
+    if (state.finished) {
+        return;
+    }
+
+    state.current_chunk_idx = 0;
+
+    try {
+        if (state.next_records_url.empty() && state.records.empty()) {
+            std::string soql = GenerateSOQLQuery(state, bind_data);
+            auto [records, next_records_url] = ExecuteSalesforceQuery(soql, bind_data.credentials);
+            state.records = std::move(records);
+            state.next_records_url = std::move(next_records_url);
+        }
+
+        if (!state.records.empty() && state.current_record_idx < state.records.size()) {
+            WriteRecordsToOutput(state, output);
+        }
+
+        while (!state.next_records_url.empty()) {
+            auto [records, next_records_url] = ContinueSalesforceQuery(state.next_records_url, bind_data.credentials);
+            state.records = std::move(records);
+            state.next_records_url = std::move(next_records_url);
+            
+            WriteRecordsToOutput(state, output);
+            if (state.current_chunk_idx >= STANDARD_VECTOR_SIZE) {
+                break;
+            }
+        }
+    } catch (const std::exception &e) {
+        throw std::runtime_error("Failed to execute Salesforce query: " + std::string(e.what()));
+    }
+
+    if (state.count_only) {
+        auto rowCount = output.GetValue(0, 0).GetValue<int64_t>();
+        output.SetCardinality(rowCount);
+    } else {
+        output.SetCardinality(state.current_chunk_idx);
+    }
+    
+    if (state.next_records_url.empty() && state.current_record_idx == 0) {
         state.finished = true;
     }
 }
@@ -736,12 +790,7 @@ static unique_ptr<FunctionData> SalesforceObjectBind(ClientContext &context, Tab
     } catch (const std::exception &e) {
         throw BinderException("Failed to bind Salesforce object: " + std::string(e.what()));
     }
-    
-    // Handle projection pushdown
-    /*
-
-    */
-    
+        
     return std::move(bind_data);
 }
 
@@ -815,9 +864,24 @@ static unique_ptr<LocalTableFunctionState> SalesforceObjectInitLocalState(Execut
 
     if (input.column_ids.size() > 0) {
         scan_state->selected_fields.clear();
-        for (const auto &col_idx : input.column_ids) {
-            scan_state->selected_fields.push_back(bind_data.fields[col_idx]);
+
+        if (input.column_ids.size() == 1 && input.column_ids[0] == UINT64_MAX) {
+            scan_state->count_only = true;
+            
+            SalesforceField countField;
+            countField.name = "expr0";
+            countField.duckdb_type = LogicalType::BIGINT;
+            countField.nillable = false;
+            countField.type = "int";
+
+            scan_state->selected_fields.push_back(countField);
+        } else {
+            for (const auto &col_idx : input.column_ids) {
+                scan_state->selected_fields.push_back(bind_data.fields[col_idx]);
+            }
         }
+    } else {
+        scan_state->selected_fields = bind_data.fields;
     }
     
     // Handle filter pushdown
