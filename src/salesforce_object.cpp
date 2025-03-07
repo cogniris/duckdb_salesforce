@@ -27,6 +27,35 @@ using namespace duckdb_httplib_openssl;
 
 namespace duckdb {
 
+    // Salesforce OAuth credentials for username/password flow
+struct SalesforceCredentials {
+    // OAuth client credentials
+    std::string client_id; 
+    std::string client_secret; 
+    
+    // User credentials
+    std::string username;
+    std::string password;
+    
+    // OAuth endpoints
+    std::string login_url = "https://login.salesforce.com";
+    
+    // Token information (will be populated during authentication)
+    std::string access_token;
+    std::string instance_url;
+    std::string refresh_token;
+    time_t token_expiry = 0;
+};
+
+// Structure to hold Salesforce scan bind data
+struct SalesforceScanBindData : public TableFunctionData {
+    long row_limit;
+    std::string org_secret_name;
+    std::string table_name;
+    std::vector<SalesforceField> fields;
+    SalesforceCredentials credentials;
+};
+
 // Define a structure to hold Salesforce record data
 struct SalesforceRecord {
     // Store the parsed JSON document and root value
@@ -94,7 +123,7 @@ struct SalesforceRecord {
     
     // Check if a value is null
     bool is_null() const {
-        return root == nullptr || duckdb_yyjson::yyjson_is_null(root);
+        return root == nullptr || yyjson_is_null(root);
     }
     
     // Get a field from the record
@@ -103,24 +132,13 @@ struct SalesforceRecord {
     }
 };
 
-// Salesforce OAuth credentials for username/password flow
-struct SalesforceCredentials {
-    // OAuth client credentials
-    std::string client_id; 
-    std::string client_secret; 
-    
-    // User credentials
-    std::string username;
-    std::string password;
-    
-    // OAuth endpoints
-    std::string login_url = "https://login.salesforce.com";
-    
-    // Token information (will be populated during authentication)
-    std::string access_token;
-    std::string instance_url;
-    std::string refresh_token;
-    time_t token_expiry = 0;
+// Structure to hold Salesforce scan state
+struct SalesforceScanState : public LocalTableFunctionState {
+    std::vector<SalesforceField> selected_fields;
+    std::string where_clause;
+    std::vector<SalesforceRecord> records;
+    size_t current_row = 0;
+    bool finished = false;
 };
 
 // Function to authenticate with Salesforce using username/password flow
@@ -161,7 +179,7 @@ static bool AuthenticateWithSalesforce(SalesforceCredentials &credentials) {
         }
         
         yyjson_val *root = yyjson_doc_get_root(doc);
-        if (!root || duckdb_yyjson::yyjson_get_type(root) != YYJSON_TYPE_OBJ) {
+        if (!root || yyjson_get_type(root) != YYJSON_TYPE_OBJ) {
             yyjson_doc_free(doc);
             throw std::runtime_error("Invalid JSON response from Salesforce");
         }
@@ -176,14 +194,14 @@ static bool AuthenticateWithSalesforce(SalesforceCredentials &credentials) {
             throw std::runtime_error("Missing required fields in Salesforce authentication response");
         }
         
-        credentials.access_token = duckdb_yyjson::yyjson_get_str(access_token);
-        credentials.instance_url = duckdb_yyjson::yyjson_get_str(instance_url);
+        credentials.access_token = yyjson_get_str(access_token);
+        credentials.instance_url = yyjson_get_str(instance_url);
         
         // Set token expiry (typically 2 hours for Salesforce)
         credentials.token_expiry = time(nullptr) + 7200; // 2 hours
         
         if (refresh_token) {
-            credentials.refresh_token = duckdb_yyjson::yyjson_get_str(refresh_token);
+            credentials.refresh_token = yyjson_get_str(refresh_token);
         }
         
         // Free the document
@@ -214,23 +232,27 @@ static Client GetAuthorisedClient(SalesforceCredentials &credentials) {
     return std::move(client);
 }
 
-// Structure to hold Salesforce scan bind data
-struct SalesforceScanBindData : public TableFunctionData {
-    long row_limit;
-    std::string org_secret_name;
-    std::string table_name;
-    std::vector<SalesforceField> fields;
-    SalesforceCredentials credentials;
-};
-
-// Structure to hold Salesforce scan state
-struct SalesforceScanState : public LocalTableFunctionState {
-    std::vector<SalesforceField> selected_fields;
-    std::string where_clause;
-    std::vector<SalesforceRecord> records;
-    size_t current_row = 0;
-    bool finished = false;
-};
+// Salesforce data type mapping to DuckDB types
+LogicalType MapSalesforceType(const std::string &sf_type) {
+    if (sf_type == "id" || sf_type == "string" || sf_type == "reference" || sf_type == "picklist" || 
+        sf_type == "multipicklist" || sf_type == "textarea" || sf_type == "phone" || sf_type == "url" || 
+        sf_type == "email") {
+        return LogicalType::VARCHAR;
+    } else if (sf_type == "boolean") {
+        return LogicalType::BOOLEAN;
+    } else if (sf_type == "int") {
+        return LogicalType::INTEGER;
+    } else if (sf_type == "double" || sf_type == "currency" || sf_type == "percent") {
+        return LogicalType::DOUBLE;
+    } else if (sf_type == "date") {
+        return LogicalType::DATE;
+    } else if (sf_type == "datetime") {
+        return LogicalType::TIMESTAMP;
+    } else {
+        // Default to VARCHAR for unknown types
+        return LogicalType::VARCHAR;
+    }
+}
 
 // Function to fetch Salesforce object metadata
 static std::vector<SalesforceField> FetchSalesforceObjectMetadata(const std::string &object_name, SalesforceCredentials &credentials) {
@@ -273,14 +295,14 @@ static std::vector<SalesforceField> FetchSalesforceObjectMetadata(const std::str
         }
         
         yyjson_val *root = yyjson_doc_get_root(doc);
-        if (!root || duckdb_yyjson::yyjson_get_type(root) != YYJSON_TYPE_OBJ) {
+        if (!root || yyjson_get_type(root) != YYJSON_TYPE_OBJ) {
             yyjson_doc_free(doc);
             throw std::runtime_error("Invalid JSON response from Salesforce");
         }
         
         // Get the fields array
         yyjson_val *fields_arr = yyjson_obj_get(root, "fields");
-        if (!fields_arr || duckdb_yyjson::yyjson_get_type(fields_arr) != YYJSON_TYPE_ARR) {
+        if (!fields_arr || yyjson_get_type(fields_arr) != YYJSON_TYPE_ARR) {
             yyjson_doc_free(doc);
             throw std::runtime_error("Missing or invalid 'fields' array in Salesforce metadata response");
         }
@@ -289,7 +311,7 @@ static std::vector<SalesforceField> FetchSalesforceObjectMetadata(const std::str
         size_t idx, max;
         yyjson_val *field;
         yyjson_arr_foreach(fields_arr, idx, max, field) {
-            if (duckdb_yyjson::yyjson_get_type(field) != YYJSON_TYPE_OBJ) {
+            if (yyjson_get_type(field) != YYJSON_TYPE_OBJ) {
                 continue;
             }
             
@@ -300,9 +322,9 @@ static std::vector<SalesforceField> FetchSalesforceObjectMetadata(const std::str
             yyjson_val *nillable = yyjson_obj_get(field, "nillable");
             
             if (name && type) {
-                sf_field.name = duckdb_yyjson::yyjson_get_str(name);
-                sf_field.type = duckdb_yyjson::yyjson_get_str(type);
-                sf_field.nillable = nillable ? duckdb_yyjson::yyjson_get_bool(nillable) : false;
+                sf_field.name = yyjson_get_str(name);
+                sf_field.type = yyjson_get_str(type);
+                sf_field.nillable = nillable ? yyjson_get_bool(nillable) : false;
                 sf_field.duckdb_type = MapSalesforceType(sf_field.type);
                 fields.push_back(sf_field);
             }
@@ -335,14 +357,14 @@ static std::pair<std::vector<SalesforceRecord>, std::string> ProcessSalesforceRe
     }
     
     yyjson_val *root = yyjson_doc_get_root(doc);
-    if (!root || duckdb_yyjson::yyjson_get_type(root) != YYJSON_TYPE_OBJ) {
+    if (!root || yyjson_get_type(root) != YYJSON_TYPE_OBJ) {
         yyjson_doc_free(doc);
         throw std::runtime_error("Invalid JSON response from Salesforce");
     }
     
     // Get the records array
     yyjson_val *records_arr = yyjson_obj_get(root, "records");
-    if (!records_arr || duckdb_yyjson::yyjson_get_type(records_arr) != YYJSON_TYPE_ARR) {
+    if (!records_arr || yyjson_get_type(records_arr) != YYJSON_TYPE_ARR) {
         yyjson_doc_free(doc);
         throw std::runtime_error("Missing or invalid 'records' array in Salesforce response");
     }
@@ -364,8 +386,8 @@ static std::pair<std::vector<SalesforceRecord>, std::string> ProcessSalesforceRe
     
     // Get URL for next page, if any
     yyjson_val *next_records_url_val = yyjson_obj_get(root, "nextRecordsUrl");
-    if (next_records_url_val && duckdb_yyjson::yyjson_is_str(next_records_url_val)) {
-        next_records_url = duckdb_yyjson::yyjson_get_str(next_records_url_val);
+    if (next_records_url_val && yyjson_is_str(next_records_url_val)) {
+        next_records_url = yyjson_get_str(next_records_url_val);
     }
     
     // Free the document as we've copied the records we need
@@ -451,34 +473,34 @@ static std::vector<SalesforceRecord> ExecuteSalesforceQuery(const std::string &q
 
 // Convert Salesforce value to DuckDB value
 static Value ConvertSalesforceValue(yyjson_val *value, const LogicalType &type, const std::string &field_name) {
-    if (!value || duckdb_yyjson::yyjson_is_null(value)) {
+    if (!value || yyjson_is_null(value)) {
         return Value(type);
     }
     
     switch (type.id()) {
         case LogicalTypeId::VARCHAR:
-            if (duckdb_yyjson::yyjson_is_str(value)) {
-                return Value(duckdb_yyjson::yyjson_get_str(value));
+            if (yyjson_is_str(value)) {
+                return Value(yyjson_get_str(value));
             }
             throw std::runtime_error("Expected string value for field: " + field_name);
         case LogicalTypeId::BOOLEAN:
-            if (duckdb_yyjson::yyjson_is_bool(value)) {
-                return Value::BOOLEAN(duckdb_yyjson::yyjson_get_bool(value));
+            if (yyjson_is_bool(value)) {
+                return Value::BOOLEAN(yyjson_get_bool(value));
             }
             throw std::runtime_error("Expected boolean value for field: " + field_name);
         case LogicalTypeId::INTEGER:
-            if (duckdb_yyjson::yyjson_is_int(value)) {
-                return Value::INTEGER((int32_t)duckdb_yyjson::yyjson_get_int(value));
+            if (yyjson_is_int(value)) {
+                return Value::INTEGER((int32_t)yyjson_get_int(value));
             }
             throw std::runtime_error("Expected integer value for field: " + field_name);
         case LogicalTypeId::DOUBLE:
-            if (duckdb_yyjson::yyjson_is_num(value)) {
-                return Value::DOUBLE(duckdb_yyjson::yyjson_get_num(value));
+            if (yyjson_is_num(value)) {
+                return Value::DOUBLE(yyjson_get_num(value));
             }
             throw std::runtime_error("Expected numeric value for field: " + field_name);
         case LogicalTypeId::DATE: {
-            if (duckdb_yyjson::yyjson_is_str(value)) {
-                std::string date_str = duckdb_yyjson::yyjson_get_str(value);
+            if (yyjson_is_str(value)) {
+                std::string date_str = yyjson_get_str(value);
                 date_t date_val;
                 bool special;
                 idx_t pos = 0;
@@ -491,8 +513,8 @@ static Value ConvertSalesforceValue(yyjson_val *value, const LogicalType &type, 
             throw std::runtime_error("Expected string date value for field: " + field_name);
         }
         case LogicalTypeId::TIMESTAMP: {
-            if (duckdb_yyjson::yyjson_is_str(value)) {
-                std::string ts_str = duckdb_yyjson::yyjson_get_str(value);
+            if (yyjson_is_str(value)) {
+                std::string ts_str = yyjson_get_str(value);
                 timestamp_t ts_val;
                 TimestampCastResult result = Timestamp::TryConvertTimestamp(ts_str.c_str(), ts_str.length(), ts_val);
                 if (result != TimestampCastResult::SUCCESS) {
@@ -503,12 +525,12 @@ static Value ConvertSalesforceValue(yyjson_val *value, const LogicalType &type, 
             throw std::runtime_error("Expected string timestamp value for field: " + field_name);
         }       
         default:
-            if (duckdb_yyjson::yyjson_is_str(value)) {
-                return Value(duckdb_yyjson::yyjson_get_str(value));
-            } else if (duckdb_yyjson::yyjson_is_num(value)) {
-                return Value(std::to_string(duckdb_yyjson::yyjson_get_num(value)));
-            } else if (duckdb_yyjson::yyjson_is_bool(value)) {
-                return Value(duckdb_yyjson::yyjson_get_bool(value) ? "true" : "false");
+            if (yyjson_is_str(value)) {
+                return Value(yyjson_get_str(value));
+            } else if (yyjson_is_num(value)) {
+                return Value(std::to_string(yyjson_get_num(value)));
+            } else if (yyjson_is_bool(value)) {
+                return Value(yyjson_get_bool(value) ? "true" : "false");
             } else {
                 return Value(type); // Return NULL for unsupported types
             }
@@ -518,6 +540,13 @@ static Value ConvertSalesforceValue(yyjson_val *value, const LogicalType &type, 
 static void SalesforceObjectScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
     auto &bind_data = (SalesforceScanBindData &)*data.bind_data;
     auto &state = (SalesforceScanState &)*data.local_state;
+
+    // Better approach?
+    // write converted results to output as we go. Track count written. Hold required state to issue next API request in state.
+    // Issue API request when we have STANDARD_VECTOR_SIZE rows to output.
+    // Keep going until we have no more rows to process.
+    // Work by row then column rather than column then row.
+    // avoid holding all results in memory, write directly to output as we go.
     
     if (state.finished) {
         return;
@@ -578,40 +607,23 @@ static void SalesforceObjectScan(ClientContext &context, TableFunctionInput &dat
     
     // Set the output cardinality
     output.SetCardinality(count);
+
+    auto &fields = state.selected_fields.empty() ? bind_data.fields : state.selected_fields;
     
     // Process each column
     for (idx_t col_idx = 0; col_idx < output.ColumnCount(); col_idx++) {
         auto &column = output.data[col_idx];
-        auto &field = state.selected_fields.empty() ? bind_data.fields[col_idx] : state.selected_fields[col_idx];
+        auto &field = fields[col_idx];
         
         // Process each row in the chunk
         for (idx_t row_idx = 0; row_idx < count; row_idx++) {
             const auto &record = state.records[state.current_row + row_idx];
             
             try {
-                // Handle nested fields (e.g., Owner.Name)
-                std::string field_name = field.name;
                 yyjson_val *field_value = record.root;
                 
-                size_t dot_pos = field_name.find('.');
-                while (dot_pos != std::string::npos) {
-                    std::string parent = field_name.substr(0, dot_pos);
-                    field_name = field_name.substr(dot_pos + 1);
-                    
-                    yyjson_val *parent_val = yyjson_obj_get(field_value, parent.c_str());
-                    if (parent_val && !duckdb_yyjson::yyjson_is_null(parent_val)) {
-                        field_value = parent_val;
-                    } else {
-                        // Parent field is null or doesn't exist
-                        field_value = nullptr;
-                        break;
-                    }
-                    
-                    dot_pos = field_name.find('.');
-                }
-                
                 if (field_value) {
-                    yyjson_val *field_val = yyjson_obj_get(field_value, field_name.c_str());
+                    yyjson_val *field_val = yyjson_obj_get(field_value, field.name.c_str());
                     column.SetValue(row_idx, ConvertSalesforceValue(field_val, field.duckdb_type, field.name));
                 } else {
                     column.SetValue(row_idx, Value(field.duckdb_type));

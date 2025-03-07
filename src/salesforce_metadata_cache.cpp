@@ -3,28 +3,6 @@
 
 namespace duckdb {
 
-// Salesforce data type mapping to DuckDB types
-LogicalType MapSalesforceType(const std::string &sf_type) {
-    if (sf_type == "id" || sf_type == "string" || sf_type == "reference" || sf_type == "picklist" || 
-        sf_type == "multipicklist" || sf_type == "textarea" || sf_type == "phone" || sf_type == "url" || 
-        sf_type == "email") {
-        return LogicalType::VARCHAR;
-    } else if (sf_type == "boolean") {
-        return LogicalType::BOOLEAN;
-    } else if (sf_type == "int") {
-        return LogicalType::INTEGER;
-    } else if (sf_type == "double" || sf_type == "currency" || sf_type == "percent") {
-        return LogicalType::DOUBLE;
-    } else if (sf_type == "date") {
-        return LogicalType::DATE;
-    } else if (sf_type == "datetime") {
-        return LogicalType::TIMESTAMP;
-    } else {
-        // Default to VARCHAR for unknown types
-        return LogicalType::VARCHAR;
-    }
-}
-
 // Initialize static members
 SalesforceMetadataCache* SalesforceMetadataCache::instance = nullptr;
 std::mutex SalesforceMetadataCache::instance_mutex;

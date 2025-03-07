@@ -16,9 +16,6 @@ struct SalesforceField {
     LogicalType duckdb_type;
 };
 
-// Salesforce data type mapping to DuckDB types
-LogicalType MapSalesforceType(const std::string &sf_type);
-
 // Class to cache Salesforce object metadata
 class SalesforceMetadataCache {
 private:
