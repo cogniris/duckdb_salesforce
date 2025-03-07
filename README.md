@@ -2,9 +2,8 @@
 
 This extension allows you to query Salesforce data directly from DuckDB, enabling seamless integration between your Salesforce instance and DuckDB's powerful analytical capabilities.
 
-WARNING!!!
-This code has been heavily generated using Claude 3.7 with some hand holding/tweaks from a non C++ developer. I fully expect that it is a horrorshow to a seasoned C++ engineer.
-It is working well enough for my purposes currently.
+## WARNING!!!
+This code has been heavily generated using Claude 3.7 with some hand holding/tweaks from a non C++ developer. I fully expect that it is a horrorshow to a seasoned C++ engineer. It is working well enough for my purposes currently. It's a work-in-progress and will need a lot more resilience & testing so use at your own risk!
 
 ## Features
 
@@ -20,12 +19,17 @@ It is working well enough for my purposes currently.
 
 ### Installation
 
+Note: For the moment this is a unsigned extension and will DuckDB will only load it if allow_unsigned_extensions is enabled.
+
+
 ```sql
 INSTALL salesforce;
 LOAD salesforce;
 ```
 
 ### Setting up Salesforce Credentials
+
+Only the user/password OAuth Flow is currently supported. More flows need to be integrated.
 
 Store your Salesforce credentials securely using DuckDB's Secret Manager:
 
