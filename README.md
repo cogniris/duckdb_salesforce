@@ -50,21 +50,21 @@ Once your credentials are set up, you can query Salesforce objects:
 
 ```sql
 -- Query all fields from Account
-SELECT * FROM salesforce_object('my_salesforce_org', 'Account');
+SELECT * FROM salesforce_object('dev', 'Account');
 
 -- Query specific fields with a limit
 SELECT Id, Name, Industry 
-FROM salesforce_object('my_salesforce_org', 'Account', row_limit=100);
+FROM salesforce_object('dev', 'Account', row_limit=100);
 
 -- Apply filters (these will be pushed down to Salesforce)
 SELECT Id, Name, AnnualRevenue
-FROM salesforce_object('my_salesforce_org', 'Account')
+FROM salesforce_object('dev', 'Account')
 WHERE Industry = 'Technology' AND AnnualRevenue > 1000000;
 
 -- Join with local data
 SELECT a.Name, a.Industry, o.Amount
-FROM salesforce_object('my_salesforce_org', 'Account') a
-JOIN salesforce_object('my_salesforce_org', 'Opportunity') o
+FROM salesforce_object('dev', 'Account') a
+JOIN salesforce_object('dev', 'Opportunity') o
   ON a.Id = o.AccountId
 WHERE o.StageName = 'Closed Won';
 ```
@@ -72,21 +72,29 @@ Replacement scans are also supported so the following simpler syntax will also w
 
 ```sql
 -- Query all fields from Account
-SELECT * FROM my_salesforce_org.Account;
+SELECT * FROM dev.Account;
 
 
 -- Apply filters (these will be pushed down to Salesforce)
 SELECT Id, Name, AnnualRevenue
-FROM my_salesforce_org.Account
+FROM dev.Account
 WHERE Industry = 'Technology' AND AnnualRevenue > 1000000;
 
 -- Join with local data
 SELECT a.Name, a.Industry, o.Amount
-FROM my_salesforce_org.Account a
-JOIN my_salesforce_org.Opportunity o
+FROM dev.Account a
+JOIN dev.Opportunity o
   ON a.Id = o.AccountId
 WHERE o.StageName = 'Closed Won';
 ```
+
+Bear in mind that DuckDB LIMIT clauses are applied at the end of a pipeline and are therefore not pushed down into the SOQL query generated. So if you apply
+a LIMIT in you DuckDB query and use the replacement scan syntax, you will pull all qualifying rows from Salesforce before discarding any above the LIMIT.
+
+The row_limit that can be applied to the salesforce_object call will add the LIMIT to the SOQL queryt issues against Salesforce but since no ORDER BY is generated,
+you will get an indeterminate set of rows returned up to the LIMIT amount.
+
+It may typically be sensible to issue queries againt Salesforce objects and then materialise the returned data in a DuckDB table for subsequent usage and analysis.
 
 ## Technical Details
 
