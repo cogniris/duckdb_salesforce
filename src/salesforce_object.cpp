@@ -710,7 +710,7 @@ static unique_ptr<FunctionData> SalesforceObjectBind(ClientContext &context, Tab
     for (auto &kv : input.named_parameters) {
         if (kv.first == "row_limit") {
             try {
-                bind_data->row_limit = kv.second.GetValue<u_int32_t>();
+                bind_data->row_limit = kv.second.GetValue<uint32_t>();
             } catch (const std::exception& e) {
                 throw InvalidInputException("Invalid value for 'row_limit' parameter. Expected an integer value.");
             }
@@ -775,7 +775,7 @@ static unique_ptr<FunctionData> SalesforceObjectBind(ClientContext &context, Tab
         bind_data->credentials.refresh_token = secretValue.ToString();
     }
     if (kv_secret->TryGetValue("token_expiry", secretValue)) {
-        bind_data->credentials.token_expiry = secretValue.GetValue<u_int32_t>();
+        bind_data->credentials.token_expiry = secretValue.GetValue<uint32_t>();
     }
     
     try {
