@@ -710,7 +710,7 @@ static unique_ptr<FunctionData> SalesforceObjectBind(ClientContext &context, Tab
     for (auto &kv : input.named_parameters) {
         if (kv.first == "row_limit") {
             try {
-                bind_data->row_limit = kv.second.GetValue<u_int32_t>();
+                bind_data->row_limit = kv.second.GetValue<uint32_t>();
             } catch (const std::exception& e) {
                 throw InvalidInputException("Invalid value for 'row_limit' parameter. Expected an integer value.");
             }
@@ -775,7 +775,7 @@ static unique_ptr<FunctionData> SalesforceObjectBind(ClientContext &context, Tab
         bind_data->credentials.refresh_token = secretValue.ToString();
     }
     if (kv_secret->TryGetValue("token_expiry", secretValue)) {
-        bind_data->credentials.token_expiry = secretValue.GetValue<u_int32_t>();
+        bind_data->credentials.token_expiry = secretValue.GetValue<uint32_t>();
     }
     
     try {
@@ -817,6 +817,7 @@ static void GenerateSOQLWhereClauseInternal(const std::string &column_name, Tabl
         case duckdb::TableFilterType::CONJUNCTION_OR:
         case duckdb::TableFilterType::CONJUNCTION_AND: {
             auto conjuction_filter = reinterpret_cast<duckdb::ConjunctionFilter *>(filter);
+            where_clause << "(";
             if (conjuction_filter->child_filters.size() > 1) {
                 for (idx_t i = 0; i < conjuction_filter->child_filters.size() - 1; i++) {
                     GenerateSOQLWhereClauseInternal(column_name, conjuction_filter->child_filters[i].get(), where_clause);
@@ -824,6 +825,7 @@ static void GenerateSOQLWhereClauseInternal(const std::string &column_name, Tabl
                 }
             }
             GenerateSOQLWhereClauseInternal(column_name, conjuction_filter->child_filters.back().get(), where_clause);
+            where_clause << ")";
             return;
         }
         case duckdb::TableFilterType::OPTIONAL_FILTER: {
