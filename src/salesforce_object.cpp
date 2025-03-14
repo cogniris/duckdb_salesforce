@@ -817,6 +817,7 @@ static void GenerateSOQLWhereClauseInternal(const std::string &column_name, Tabl
         case duckdb::TableFilterType::CONJUNCTION_OR:
         case duckdb::TableFilterType::CONJUNCTION_AND: {
             auto conjuction_filter = reinterpret_cast<duckdb::ConjunctionFilter *>(filter);
+            where_clause << "(";
             if (conjuction_filter->child_filters.size() > 1) {
                 for (idx_t i = 0; i < conjuction_filter->child_filters.size() - 1; i++) {
                     GenerateSOQLWhereClauseInternal(column_name, conjuction_filter->child_filters[i].get(), where_clause);
@@ -824,6 +825,7 @@ static void GenerateSOQLWhereClauseInternal(const std::string &column_name, Tabl
                 }
             }
             GenerateSOQLWhereClauseInternal(column_name, conjuction_filter->child_filters.back().get(), where_clause);
+            where_clause << ")";
             return;
         }
         case duckdb::TableFilterType::OPTIONAL_FILTER: {
