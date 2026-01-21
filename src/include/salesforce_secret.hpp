@@ -12,7 +12,7 @@ class CreateSecretFunction;
 struct CreateSalesforceSecretFunctions {
 public:
 	//! Register all CreateSecretFunctions
-	static void Register(DatabaseInstance &instance);
+	static void Register(ExtensionLoader &loader);
 };
 
 } // namespace duckdb

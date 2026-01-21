@@ -1,6 +1,5 @@
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/unique_ptr.hpp"
-#include "duckdb/main/extension_util.hpp"
 #include "duckdb/main/secret/secret.hpp"
 #include "salesforce_secret.hpp"
 
@@ -41,7 +40,7 @@ static void RegisterCommonSecretParameters(CreateSecretFunction &function) {
     function.named_parameters["token_expiry"] = LogicalType::INTEGER;
 }
 
-void CreateSalesforceSecretFunctions::Register(DatabaseInstance &instance) {
+void CreateSalesforceSecretFunctions::Register(ExtensionLoader &loader) {
 	string type = "salesforce";
 
 	// Register the new type
@@ -49,13 +48,13 @@ void CreateSalesforceSecretFunctions::Register(DatabaseInstance &instance) {
 	secret_type.name = type;
 	secret_type.deserializer = KeyValueSecret::Deserialize<KeyValueSecret>;
 	secret_type.default_provider = "access_token";
-	ExtensionUtil::RegisterSecretType(instance, secret_type);
+	loader.RegisterSecretType(secret_type);
 
 	// Register the access_token secret provider
 	CreateSecretFunction access_token_function = {type, "access_token", CreateSecretFromAccessToken};
 	access_token_function.named_parameters["access_token"] = LogicalType::VARCHAR;
 	RegisterCommonSecretParameters(access_token_function);
-	ExtensionUtil::RegisterFunction(instance, access_token_function);
+	loader.RegisterFunction(access_token_function);
 }
 
 } // namespace duckdb
