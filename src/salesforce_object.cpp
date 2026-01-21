@@ -554,7 +554,7 @@ static Value ConvertSalesforceValue(yyjson_val *value, const LogicalType &type, 
             if (yyjson_is_str(value)) {
                 std::string ts_str = yyjson_get_str(value);
                 timestamp_t ts_val;
-                TimestampCastResult result = Timestamp::TryConvertTimestamp(ts_str.c_str(), ts_str.length(), ts_val);
+                TimestampCastResult result = Timestamp::TryConvertTimestamp(ts_str.c_str(), ts_str.length(), ts_val, false);
                 if (result != TimestampCastResult::SUCCESS) {
                     throw std::runtime_error("Failed to convert Salesforce timestamp value: " + ts_str);
                 }

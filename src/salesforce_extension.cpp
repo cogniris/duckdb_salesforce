@@ -10,7 +10,6 @@
 #include "duckdb/parser/expression/function_expression.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
-#include "duckdb/main/extension_util.hpp"
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 #include "salesforce_object.hpp"
 #include "salesforce_secret.hpp"
@@ -67,21 +66,21 @@ unique_ptr<TableRef> ReadObjectReplacement(ClientContext &context, ReplacementSc
 	return std::move(table_function);
 }
 
-static void LoadInternal(DatabaseInstance &instance) {
+static void LoadInternal(ExtensionLoader &loader) {
 	// Load Secret functions
-	CreateSalesforceSecretFunctions::Register(instance);
+	CreateSalesforceSecretFunctions::Register(loader);
 
     // Register the salesforce_object table function
     auto salesforce_object_func = make_uniq<SalesforceObjectFunction>();
-    ExtensionUtil::RegisterFunction(instance, *salesforce_object_func);
+    loader.RegisterFunction(*salesforce_object_func);
 
       // Register replacement scan for read_gsheet
-    auto &config = DBConfig::GetConfig(instance);
+    auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
     config.replacement_scans.emplace_back(ReadObjectReplacement);
 }
 
-void SalesforceExtension::Load(DuckDB &db) {
-	LoadInternal(*db.instance);
+void SalesforceExtension::Load(ExtensionLoader &loader) {
+	LoadInternal(loader);
 }
 
 std::string SalesforceExtension::Name() {
@@ -100,8 +99,8 @@ std::string SalesforceExtension::Version() const {
 
 extern "C" {
 
-DUCKDB_EXTENSION_API void salesforce_init(duckdb::DatabaseInstance &db) {
-    duckdb::LoadInternal(db);
+DUCKDB_CPP_EXTENSION_ENTRY(salesforce, loader) {
+	duckdb::LoadInternal(loader);
 }
 
 DUCKDB_EXTENSION_API const char *salesforce_version() {
