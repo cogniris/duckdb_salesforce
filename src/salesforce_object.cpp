@@ -719,13 +719,13 @@ static unique_ptr<FunctionData> SalesforceObjectBind(ClientContext &context, Tab
 
     auto &secret_manager = SecretManager::Get(context);
     auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
-    auto secret_match = secret_manager.LookupSecret(transaction, bind_data->org_secret_name, "salesforce");
+    auto secret_entry = secret_manager.GetSecretByName(transaction, bind_data->org_secret_name);
     
-    if (!secret_match.HasMatch()) {
-        throw InvalidInputException("No 'salesforce' secret found for '%s'. Please create a secret with 'CREATE SECRET' first.", bind_data->org_secret_name);
+    if (!secret_entry) {
+        throw InvalidInputException("No secret found with name '%s'. Please create a secret with 'CREATE SECRET' first.", bind_data->org_secret_name);
     }
 
-    auto &secret = secret_match.GetSecret();
+    auto &secret = *secret_entry->secret;
     if (secret.GetType() != "salesforce") {
         throw InvalidInputException("Invalid secret type. Expected 'salesforce', got '%s'", secret.GetType());
     }
