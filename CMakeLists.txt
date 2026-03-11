@@ -24,8 +24,11 @@ if (NOT EMSCRIPTEN)
     include_directories(${OPENSSL_INCLUDE_DIR})
 endif()
 
-set(EXTENSION_SOURCES 
+set(EXTENSION_SOURCES
     src/salesforce_extension.cpp
+    src/salesforce_auth.cpp
+    src/salesforce_api.cpp
+    src/salesforce_soql.cpp
     src/salesforce_object.cpp
     src/salesforce_metadata_cache.cpp
     src/salesforce_secret.cpp
