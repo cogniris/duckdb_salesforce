@@ -49,9 +49,12 @@ public:
     
     // Check if metadata is in cache and not expired
     bool IsInCache(const std::string& object_name);
-    
+
     // Get metadata from cache
     std::vector<SalesforceField> GetFromCache(const std::string& object_name);
+
+    // Atomically check and retrieve from cache (avoids TOCTOU race)
+    bool TryGetFromCache(const std::string& object_name, std::vector<SalesforceField>& out_fields);
     
     // Clear the cache
     void ClearCache();

@@ -48,6 +48,21 @@ std::vector<SalesforceField> SalesforceMetadataCache::GetFromCache(const std::st
     return std::vector<SalesforceField>();
 }
 
+bool SalesforceMetadataCache::TryGetFromCache(const std::string& object_name, std::vector<SalesforceField>& out_fields) {
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    auto it = cache.find(object_name);
+    if (it == cache.end()) {
+        return false;
+    }
+    time_t now = time(nullptr);
+    time_t cache_time = it->second.second;
+    if ((now - cache_time) >= cache_expiry_seconds) {
+        return false;
+    }
+    out_fields = it->second.first;
+    return true;
+}
+
 void SalesforceMetadataCache::ClearCache() {
     std::lock_guard<std::mutex> lock(cache_mutex);
     cache.clear();

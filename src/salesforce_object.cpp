@@ -54,6 +54,7 @@ struct SalesforceScanBindData : public TableFunctionData {
     std::string table_name;
     std::vector<SalesforceField> fields;
     SalesforceCredentials credentials;
+    std::mutex credentials_mutex;
 };
 
 // Define a structure to hold Salesforce record data
@@ -317,8 +318,9 @@ LogicalType MapSalesforceType(const std::string &sf_type) {
 static std::vector<SalesforceField> FetchSalesforceObjectMetadata(const std::string &object_name, SalesforceCredentials &credentials) {
     // Check if metadata is in cache
     auto cache = SalesforceMetadataCache::GetInstance();
-    if (cache->IsInCache(object_name)) {
-        return cache->GetFromCache(object_name);
+    std::vector<SalesforceField> cached_fields;
+    if (cache->TryGetFromCache(object_name, cached_fields)) {
+        return cached_fields;
     }
     
     // If not in cache, fetch from Salesforce API
@@ -467,32 +469,36 @@ static std::pair<std::vector<SalesforceRecord>, std::string> ProcessSalesforceRe
 
 // Function to execute SOQL query against Salesforce
 static std::pair<std::vector<SalesforceRecord>, std::string> ExecuteSalesforceQuery(
-    const std::string &query, 
-    SalesforceCredentials &credentials) {
+    const std::string &query,
+    SalesforceCredentials &credentials,
+    std::mutex &credentials_mutex) {
 
-    // Ensure we have a valid token
-    auto client = GetAuthorisedClient(credentials);
-    
+    Client client = [&]() {
+        std::lock_guard<std::mutex> lock(credentials_mutex);
+        return GetAuthorisedClient(credentials);
+    }();
+
     // Use httplib's query parameter handling
     std::string url = "/services/data/v56.0/query";
     Params params;
     params.emplace("q", query);
-    
+
     // Create empty headers - the GetAuthorisedClient already set default headers
     Headers headers;
-    
+
     // Use httplib's Get method with query parameters and empty headers
     auto res = client.Get(url.c_str(), params, headers);
-    
+
     if (res.error() != Error::Success) {
         throw std::runtime_error("Failed to execute Salesforce query: " + std::to_string(static_cast<int>(res.error())));
     }
-    
+
     std::string response_string = res->body;
     long http_code = res->status;
-    
+
     if (http_code == 401) {
-        // Token expired, refresh and retry once
+        // Token expired, refresh and retry once (under lock)
+        std::lock_guard<std::mutex> lock(credentials_mutex);
         AuthenticateWithSalesforce(credentials);
         auto retry_client = GetAuthorisedClient(credentials);
         Headers retry_headers;
@@ -510,7 +516,7 @@ static std::pair<std::vector<SalesforceRecord>, std::string> ExecuteSalesforceQu
     if (http_code != 200) {
         throw std::runtime_error("Salesforce API returned error code: " + std::to_string(http_code) + "\nResponse: " + TruncateForError(response_string));
     }
-    
+
     try {
         return ProcessSalesforceResponse(response_string);
     } catch (const std::exception &e) {
@@ -519,21 +525,26 @@ static std::pair<std::vector<SalesforceRecord>, std::string> ExecuteSalesforceQu
 }
 
 static std::pair<std::vector<SalesforceRecord>, std::string> ContinueSalesforceQuery(
-    const std::string &next_records_url, 
-    SalesforceCredentials &credentials) {
+    const std::string &next_records_url,
+    SalesforceCredentials &credentials,
+    std::mutex &credentials_mutex) {
 
-    auto client = GetAuthorisedClient(credentials);
-    
-    auto res = client.Get(next_records_url.c_str());    
+    Client client = [&]() {
+        std::lock_guard<std::mutex> lock(credentials_mutex);
+        return GetAuthorisedClient(credentials);
+    }();
+
+    auto res = client.Get(next_records_url.c_str());
     if (res.error() != Error::Success) {
         throw std::runtime_error("Failed to continue Salesforce query: " + std::to_string(static_cast<int>(res.error())));
     }
-    
+
     std::string response_string = res->body;
-    long http_code = res->status;   
-    
+    long http_code = res->status;
+
     if (http_code == 401) {
-        // Token expired, refresh and retry once
+        // Token expired, refresh and retry once (under lock)
+        std::lock_guard<std::mutex> lock(credentials_mutex);
         AuthenticateWithSalesforce(credentials);
         auto retry_client = GetAuthorisedClient(credentials);
         auto retry_res = retry_client.Get(next_records_url.c_str());
@@ -550,7 +561,7 @@ static std::pair<std::vector<SalesforceRecord>, std::string> ContinueSalesforceQ
     if (http_code != 200) {
         throw std::runtime_error("Salesforce API returned error code: " + std::to_string(http_code) + "\nResponse: " + TruncateForError(response_string));
     }
-    
+
     try {
         return ProcessSalesforceResponse(response_string);
     } catch (const std::exception &e) {
@@ -717,7 +728,7 @@ static void SalesforceObjectScan(ClientContext &context, TableFunctionInput &dat
     try {
         if (state.next_records_url.empty() && state.records.empty()) {
             std::string soql = GenerateSOQLQuery(state, bind_data);
-            auto [records, next_records_url] = ExecuteSalesforceQuery(soql, bind_data.credentials);
+            auto [records, next_records_url] = ExecuteSalesforceQuery(soql, bind_data.credentials, bind_data.credentials_mutex);
             state.records = std::move(records);
             state.next_records_url = std::move(next_records_url);
         }
@@ -727,7 +738,7 @@ static void SalesforceObjectScan(ClientContext &context, TableFunctionInput &dat
         }
 
         while (!state.next_records_url.empty()) {
-            auto [records, next_records_url] = ContinueSalesforceQuery(state.next_records_url, bind_data.credentials);
+            auto [records, next_records_url] = ContinueSalesforceQuery(state.next_records_url, bind_data.credentials, bind_data.credentials_mutex);
             state.records = std::move(records);
             state.next_records_url = std::move(next_records_url);
             
