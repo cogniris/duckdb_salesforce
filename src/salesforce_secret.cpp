@@ -53,7 +53,10 @@ void CreateSalesforceSecretFunctions::Register(ExtensionLoader &loader) {
 	loader.RegisterSecretType(secret_type);
 
 	// Register the access_token secret provider
-	CreateSecretFunction access_token_function(type, "access_token", CreateSecretFromAccessToken);
+	CreateSecretFunction access_token_function;
+	access_token_function.secret_type = type;
+	access_token_function.provider = "access_token";
+	access_token_function.function = CreateSecretFromAccessToken;
 	access_token_function.named_parameters["access_token"] = LogicalType::VARCHAR;
 	RegisterCommonSecretParameters(access_token_function);
 	loader.RegisterFunction(access_token_function);
