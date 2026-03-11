@@ -39,7 +39,10 @@ struct SalesforceCredentials {
     
     // OAuth endpoints
     std::string login_url = "https://login.salesforce.com";
-    
+
+    // Salesforce API version
+    std::string api_version = "v62.0";
+
     // Token information (will be populated during authentication)
     std::string access_token;
     std::string instance_url;
@@ -255,10 +258,17 @@ static bool AuthenticateWithSalesforce(SalesforceCredentials &credentials) {
         
         credentials.access_token = yyjson_get_str(access_token);
         credentials.instance_url = yyjson_get_str(instance_url);
-        
-        // Set token expiry (typically 2 hours for Salesforce)
-        credentials.token_expiry = time(nullptr) + 7200; // 2 hours
-        
+
+        // Parse issued_at (milliseconds since epoch) to calculate expiry
+        // Salesforce tokens typically expire after 2 hours (7200s)
+        yyjson_val *issued_at = yyjson_obj_get(root, "issued_at");
+        if (issued_at && yyjson_is_str(issued_at)) {
+            time_t issued_time = std::stoll(yyjson_get_str(issued_at)) / 1000;
+            credentials.token_expiry = issued_time + 7200;
+        } else {
+            credentials.token_expiry = time(nullptr) + 7200;
+        }
+
         if (refresh_token) {
             credentials.refresh_token = yyjson_get_str(refresh_token);
         }
@@ -329,7 +339,7 @@ static std::vector<SalesforceField> FetchSalesforceObjectMetadata(const std::str
     // Ensure we have a valid token
     auto client = GetAuthorisedClient(credentials);
     
-    std::string url = "/services/data/v56.0/sobjects/" + object_name + "/describe";
+    std::string url = "/services/data/" + credentials.api_version + "/sobjects/" + object_name + "/describe";
     auto res = client.Get(url.c_str());
     
     if (res.error() != Error::Success) {
@@ -479,7 +489,7 @@ static std::pair<std::vector<SalesforceRecord>, std::string> ExecuteSalesforceQu
     }();
 
     // Use httplib's query parameter handling
-    std::string url = "/services/data/v56.0/query";
+    std::string url = "/services/data/" + credentials.api_version + "/query";
     Params params;
     params.emplace("q", query);
 
@@ -837,6 +847,9 @@ static unique_ptr<FunctionData> SalesforceObjectBind(ClientContext &context, Tab
     }
     if (kv_secret->TryGetValue("refresh_token", secretValue)) {
         bind_data->credentials.refresh_token = secretValue.ToString();
+    }
+    if (kv_secret->TryGetValue("api_version", secretValue)) {
+        bind_data->credentials.api_version = secretValue.ToString();
     }
     if (kv_secret->TryGetValue("token_expiry", secretValue)) {
         bind_data->credentials.token_expiry = secretValue.GetValue<uint32_t>();

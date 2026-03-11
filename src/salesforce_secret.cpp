@@ -7,7 +7,8 @@ namespace duckdb {
 constexpr auto COMMON_OPTIONS = {
     "login_url", "client_id", "client_secret",
     "username", "password",
-    "access_token", "refresh_token", "token_expiry"
+    "access_token", "refresh_token", "token_expiry",
+    "api_version"
 };
 
 static void CopySecret(const std::string &key, const CreateSecretInput &input, KeyValueSecret &result) {
@@ -38,6 +39,7 @@ static void RegisterCommonSecretParameters(CreateSecretFunction &function) {
     function.named_parameters["access_token"] = LogicalType::VARCHAR;
     function.named_parameters["refresh_token"] = LogicalType::VARCHAR;
     function.named_parameters["token_expiry"] = LogicalType::INTEGER;
+    function.named_parameters["api_version"] = LogicalType::VARCHAR;
 }
 
 void CreateSalesforceSecretFunctions::Register(ExtensionLoader &loader) {
