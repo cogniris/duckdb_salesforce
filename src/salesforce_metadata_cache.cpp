@@ -1,18 +1,10 @@
-#include "include/salesforce_metadata_cache.hpp"
+#include "salesforce_metadata_cache.hpp"
 #include <time.h>
 
 namespace duckdb {
 
-// Initialize static members
-SalesforceMetadataCache* SalesforceMetadataCache::instance = nullptr;
-std::mutex SalesforceMetadataCache::instance_mutex;
-
-// Implementation of SalesforceMetadataCache methods
-SalesforceMetadataCache* SalesforceMetadataCache::GetInstance() {
-    std::lock_guard<std::mutex> lock(instance_mutex);
-    if (instance == nullptr) {
-        instance = new SalesforceMetadataCache();
-    }
+SalesforceMetadataCache& SalesforceMetadataCache::GetInstance() {
+    static SalesforceMetadataCache instance;
     return instance;
 }
 
@@ -32,7 +24,7 @@ bool SalesforceMetadataCache::IsInCache(const std::string& object_name) {
     if (it == cache.end()) {
         return false;
     }
-    
+
     // Check if cache entry is expired
     time_t now = time(nullptr);
     time_t cache_time = it->second.second;
@@ -73,4 +65,4 @@ void SalesforceMetadataCache::ClearFromCache(const std::string& object_name) {
     cache.erase(object_name);
 }
 
-} // namespace duckdb 
+} // namespace duckdb
