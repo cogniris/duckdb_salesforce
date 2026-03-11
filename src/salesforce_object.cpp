@@ -181,10 +181,28 @@ struct SalesforceScanState : public LocalTableFunctionState {
     bool finished = false;
 };
 
+static constexpr time_t HTTP_CONNECT_TIMEOUT_SEC = 30;
+static constexpr time_t HTTP_READ_TIMEOUT_SEC = 300;
+static constexpr size_t MAX_ERROR_RESPONSE_LENGTH = 512;
+
+static std::string TruncateForError(const std::string &response) {
+	if (response.size() <= MAX_ERROR_RESPONSE_LENGTH) {
+		return response;
+	}
+	return response.substr(0, MAX_ERROR_RESPONSE_LENGTH) + "... (truncated)";
+}
+
+static void ConfigureHttpClient(Client &client) {
+	client.enable_server_certificate_verification(true);
+	client.set_connection_timeout(HTTP_CONNECT_TIMEOUT_SEC);
+	client.set_read_timeout(HTTP_READ_TIMEOUT_SEC);
+}
+
 // Function to authenticate with Salesforce using username/password flow
 static bool AuthenticateWithSalesforce(SalesforceCredentials &credentials) {
     Client client(credentials.login_url.c_str());
-    
+    ConfigureHttpClient(client);
+
     // Prepare the OAuth request using httplib's form parameters
     Params form_params;
     form_params.emplace("grant_type", "password");
@@ -207,7 +225,7 @@ static bool AuthenticateWithSalesforce(SalesforceCredentials &credentials) {
     
     if (http_code != 200) {
         throw std::runtime_error("Salesforce authentication failed with code: " + std::to_string(http_code) + 
-                                "\nResponse: " + response_string);
+                                "\nResponse: " + TruncateForError(response_string));
     }
     
     try {
@@ -264,11 +282,12 @@ static void EnsureValidToken(SalesforceCredentials &credentials) {
 static Client GetAuthorisedClient(SalesforceCredentials &credentials) {
     EnsureValidToken(credentials);
     Client client(credentials.instance_url.c_str());
+    ConfigureHttpClient(client);
     client.set_bearer_token_auth(credentials.access_token);
     client.set_default_headers({
         {"Content-Type", "application/json"}
     });
-    
+
     return client;
 }
 
@@ -334,7 +353,7 @@ static std::vector<SalesforceField> FetchSalesforceObjectMetadata(const std::str
     }
 
     if (http_code != 200) {
-        throw std::runtime_error("Salesforce API returned error code: " + std::to_string(http_code) + "\nResponse: " + response_string);
+        throw std::runtime_error("Salesforce API returned error code: " + std::to_string(http_code) + "\nResponse: " + TruncateForError(response_string));
     }
 
     try {
@@ -489,7 +508,7 @@ static std::pair<std::vector<SalesforceRecord>, std::string> ExecuteSalesforceQu
     }
 
     if (http_code != 200) {
-        throw std::runtime_error("Salesforce API returned error code: " + std::to_string(http_code) + "\nResponse: " + response_string);
+        throw std::runtime_error("Salesforce API returned error code: " + std::to_string(http_code) + "\nResponse: " + TruncateForError(response_string));
     }
     
     try {
@@ -529,7 +548,7 @@ static std::pair<std::vector<SalesforceRecord>, std::string> ContinueSalesforceQ
     }
 
     if (http_code != 200) {
-        throw std::runtime_error("Salesforce API returned error code: " + std::to_string(http_code) + "\nResponse: " + response_string);
+        throw std::runtime_error("Salesforce API returned error code: " + std::to_string(http_code) + "\nResponse: " + TruncateForError(response_string));
     }
     
     try {
