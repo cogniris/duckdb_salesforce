@@ -19,7 +19,7 @@ static void CopySecret(const std::string &key, const CreateSecretInput &input, K
 	}
 }
 
-static unique_ptr<BaseSecret> CreateSecretFromAccessToken(ClientContext &context, CreateSecretInput &input) {
+static unique_ptr<BaseSecret> CreateSecretFromAccessToken(ClientContext & /*context*/, CreateSecretInput &input) {
 	auto result = make_uniq<KeyValueSecret>(input.scope, input.type, input.provider, input.name);
 
 	// Manage common option that all secret type share
@@ -53,7 +53,7 @@ void CreateSalesforceSecretFunctions::Register(ExtensionLoader &loader) {
 	loader.RegisterSecretType(secret_type);
 
 	// Register the access_token secret provider
-	CreateSecretFunction access_token_function = {type, "access_token", CreateSecretFromAccessToken};
+	CreateSecretFunction access_token_function(type, "access_token", CreateSecretFromAccessToken);
 	access_token_function.named_parameters["access_token"] = LogicalType::VARCHAR;
 	RegisterCommonSecretParameters(access_token_function);
 	loader.RegisterFunction(access_token_function);

@@ -34,6 +34,12 @@ set(EXTENSION_SOURCES
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
+# Enable compiler warnings for extension source files
+if(NOT MSVC)
+    target_compile_options(${EXTENSION_NAME} PRIVATE -Wall -Wextra)
+    target_compile_options(${LOADABLE_EXTENSION_NAME} PRIVATE -Wall -Wextra)
+endif()
+
 if (NOT EMSCRIPTEN)
     target_link_libraries(${EXTENSION_NAME} ${OPENSSL_LIBRARIES} ${WIN_LIBS})
     target_link_libraries(${LOADABLE_EXTENSION_NAME} ${OPENSSL_LIBRARIES} ${WIN_LIBS})

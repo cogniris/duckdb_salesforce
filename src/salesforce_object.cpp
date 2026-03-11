@@ -676,7 +676,7 @@ static std::string GenerateSOQLQuery(const SalesforceScanState &state, const Sal
     return soql.str();
 }
 
-static void SalesforceObjectScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+static void SalesforceObjectScan(ClientContext & /*context*/, TableFunctionInput &data, DataChunk &output) {
     auto &bind_data = (SalesforceScanBindData &)*data.bind_data;
     auto &state = (SalesforceScanState &)*data.local_state;
 
@@ -822,8 +822,8 @@ static unique_ptr<FunctionData> SalesforceObjectBind(ClientContext &context, Tab
     return std::move(bind_data);
 }
 
-static unique_ptr<GlobalTableFunctionState> SalesforceObjectInitGlobalState(ClientContext &context,
-    TableFunctionInitInput &input) {
+static unique_ptr<GlobalTableFunctionState> SalesforceObjectInitGlobalState(ClientContext & /*context*/,
+    TableFunctionInitInput & /*input*/) {
     return nullptr;
 }
 
@@ -885,9 +885,9 @@ static string GenerateSOQLWhereClause(const SalesforceScanState &state, const Ta
     return where_clause.str();
 }
 
-static unique_ptr<LocalTableFunctionState> SalesforceObjectInitLocalState(ExecutionContext &context,
+static unique_ptr<LocalTableFunctionState> SalesforceObjectInitLocalState(ExecutionContext & /*context*/,
     TableFunctionInitInput &input,
-    GlobalTableFunctionState *global_state) {
+    GlobalTableFunctionState * /*global_state*/) {
     
     auto scan_state = make_uniq<SalesforceScanState>();
     auto &bind_data = (SalesforceScanBindData &)*input.bind_data;
