@@ -319,13 +319,24 @@ static std::vector<SalesforceField> FetchSalesforceObjectMetadata(const std::str
     long http_code = res->status;
     
     if (http_code == 401) {
-        // Token expired, refresh and try again
+        // Token expired, refresh and retry once
         AuthenticateWithSalesforce(credentials);
-        return FetchSalesforceObjectMetadata(object_name, credentials);
-    } else if (http_code != 200) {
+        auto retry_client = GetAuthorisedClient(credentials);
+        auto retry_res = retry_client.Get(url.c_str());
+        if (retry_res.error() != Error::Success) {
+            throw std::runtime_error("Failed to fetch Salesforce object metadata after token refresh: " + std::to_string(static_cast<int>(retry_res.error())));
+        }
+        response_string = retry_res->body;
+        http_code = retry_res->status;
+        if (http_code == 401) {
+            throw std::runtime_error("Salesforce authentication failed after token refresh (HTTP 401)");
+        }
+    }
+
+    if (http_code != 200) {
         throw std::runtime_error("Salesforce API returned error code: " + std::to_string(http_code) + "\nResponse: " + response_string);
     }
-    
+
     try {
         // Parse JSON using yyjson
         yyjson_read_flag flags = YYJSON_READ_ALLOW_INVALID_UNICODE;
@@ -333,20 +344,20 @@ static std::vector<SalesforceField> FetchSalesforceObjectMetadata(const std::str
         if (!doc) {
             throw std::runtime_error("Failed to parse Salesforce metadata response");
         }
-        
+
         yyjson_val *root = yyjson_doc_get_root(doc);
         if (!root || yyjson_get_type(root) != YYJSON_TYPE_OBJ) {
             yyjson_doc_free(doc);
             throw std::runtime_error("Invalid JSON response from Salesforce");
         }
-        
+
         // Get the fields array
         yyjson_val *fields_arr = yyjson_obj_get(root, "fields");
         if (!fields_arr || yyjson_get_type(fields_arr) != YYJSON_TYPE_ARR) {
             yyjson_doc_free(doc);
             throw std::runtime_error("Missing or invalid 'fields' array in Salesforce metadata response");
         }
-        
+
         // Iterate through fields
         size_t idx, max;
         yyjson_val *field;
@@ -354,13 +365,13 @@ static std::vector<SalesforceField> FetchSalesforceObjectMetadata(const std::str
             if (yyjson_get_type(field) != YYJSON_TYPE_OBJ) {
                 continue;
             }
-            
+
             SalesforceField sf_field;
-            
+
             yyjson_val *name = yyjson_obj_get(field, "name");
             yyjson_val *type = yyjson_obj_get(field, "type");
             yyjson_val *nillable = yyjson_obj_get(field, "nillable");
-            
+
             if (name && type) {
                 sf_field.name = yyjson_get_str(name);
                 sf_field.type = yyjson_get_str(type);
@@ -369,10 +380,10 @@ static std::vector<SalesforceField> FetchSalesforceObjectMetadata(const std::str
                 fields.push_back(sf_field);
             }
         }
-        
+
         // Free the document
         yyjson_doc_free(doc);
-        
+
         // Add metadata to cache
         cache->AddToCache(object_name, fields);
     } catch (const std::exception &e) {
@@ -462,10 +473,22 @@ static std::pair<std::vector<SalesforceRecord>, std::string> ExecuteSalesforceQu
     long http_code = res->status;
     
     if (http_code == 401) {
-        // Token expired, refresh and try again
+        // Token expired, refresh and retry once
         AuthenticateWithSalesforce(credentials);
-        return ExecuteSalesforceQuery(query, credentials);
-    } else if (http_code != 200) {
+        auto retry_client = GetAuthorisedClient(credentials);
+        Headers retry_headers;
+        auto retry_res = retry_client.Get(url.c_str(), params, retry_headers);
+        if (retry_res.error() != Error::Success) {
+            throw std::runtime_error("Failed to execute Salesforce query after token refresh: " + std::to_string(static_cast<int>(retry_res.error())));
+        }
+        response_string = retry_res->body;
+        http_code = retry_res->status;
+        if (http_code == 401) {
+            throw std::runtime_error("Salesforce authentication failed after token refresh (HTTP 401)");
+        }
+    }
+
+    if (http_code != 200) {
         throw std::runtime_error("Salesforce API returned error code: " + std::to_string(http_code) + "\nResponse: " + response_string);
     }
     
@@ -491,9 +514,21 @@ static std::pair<std::vector<SalesforceRecord>, std::string> ContinueSalesforceQ
     long http_code = res->status;   
     
     if (http_code == 401) {
+        // Token expired, refresh and retry once
         AuthenticateWithSalesforce(credentials);
-        return ContinueSalesforceQuery(next_records_url, credentials);
-    } else if (http_code != 200) {
+        auto retry_client = GetAuthorisedClient(credentials);
+        auto retry_res = retry_client.Get(next_records_url.c_str());
+        if (retry_res.error() != Error::Success) {
+            throw std::runtime_error("Failed to continue Salesforce query after token refresh: " + std::to_string(static_cast<int>(retry_res.error())));
+        }
+        response_string = retry_res->body;
+        http_code = retry_res->status;
+        if (http_code == 401) {
+            throw std::runtime_error("Salesforce authentication failed after token refresh (HTTP 401)");
+        }
+    }
+
+    if (http_code != 200) {
         throw std::runtime_error("Salesforce API returned error code: " + std::to_string(http_code) + "\nResponse: " + response_string);
     }
     
