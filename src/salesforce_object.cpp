@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <iostream>
 #include <sstream>
+#include <memory>
 #include <mutex>
 
 #include "yyjson.hpp"
@@ -62,95 +63,26 @@ struct SalesforceScanBindData : public TableFunctionData {
 
 // Define a structure to hold Salesforce record data
 struct SalesforceRecord {
-    // Store the parsed JSON document and root value
-    yyjson_doc *doc;
+    // Shared ownership of the parsed JSON document; root points into it
+    std::shared_ptr<yyjson_doc> doc;
     yyjson_val *root;
-    
-    // Constructor
-    SalesforceRecord(yyjson_doc *d, yyjson_val *r) : doc(d), root(r) {}
-    
-    // Destructor to free the document
-    ~SalesforceRecord() {
-        if (doc) {
-            yyjson_doc_free(doc);
-        }
-    }
-    
-    // Copy constructor — required by std::pair/vector type constraints.
-    // Uses JSON round-trip since yyjson immutable docs have no native deep copy.
-    // Prefer move semantics where possible.
-    SalesforceRecord(const SalesforceRecord &other) {
-        if (!other.doc || !other.root) {
-            doc = nullptr;
-            root = nullptr;
-            return;
-        }
 
-        char *json_str = yyjson_val_write(other.root, 0, nullptr);
-        if (!json_str) {
-            doc = nullptr;
-            root = nullptr;
-            return;
-        }
+    SalesforceRecord(std::shared_ptr<yyjson_doc> d, yyjson_val *r) : doc(std::move(d)), root(r) {}
+    SalesforceRecord() : doc(nullptr), root(nullptr) {}
 
-        doc = yyjson_read(json_str, strlen(json_str), YYJSON_READ_ALLOW_INVALID_UNICODE);
-        free(json_str);
-        root = doc ? yyjson_doc_get_root(doc) : nullptr;
-    }
+    // Default copy/move are correct: shared_ptr is reference-counted,
+    // root is a non-owning pointer into the shared document.
+    SalesforceRecord(const SalesforceRecord &) = default;
+    SalesforceRecord(SalesforceRecord &&) = default;
+    SalesforceRecord& operator=(const SalesforceRecord &) = default;
+    SalesforceRecord& operator=(SalesforceRecord &&) = default;
+    ~SalesforceRecord() = default;
 
-    // Move constructor
-    SalesforceRecord(SalesforceRecord &&other) noexcept : doc(other.doc), root(other.root) {
-        other.doc = nullptr;
-        other.root = nullptr;
-    }
-    
-    SalesforceRecord& operator=(const SalesforceRecord &other) {
-        if (this != &other) {
-            if (doc) {
-                yyjson_doc_free(doc);
-            }
-
-            if (!other.doc || !other.root) {
-                doc = nullptr;
-                root = nullptr;
-                return *this;
-            }
-
-            char *json_str = yyjson_val_write(other.root, 0, nullptr);
-            if (!json_str) {
-                doc = nullptr;
-                root = nullptr;
-                return *this;
-            }
-
-            doc = yyjson_read(json_str, strlen(json_str), YYJSON_READ_ALLOW_INVALID_UNICODE);
-            free(json_str);
-            root = doc ? yyjson_doc_get_root(doc) : nullptr;
-        }
-        return *this;
-    }
-
-    // Move assignment operator
-    SalesforceRecord& operator=(SalesforceRecord &&other) noexcept {
-        if (this != &other) {
-            if (doc) {
-                yyjson_doc_free(doc);
-            }
-            
-            doc = other.doc;
-            root = other.root;
-            
-            other.doc = nullptr;
-            other.root = nullptr;
-        }
-        return *this;
-    }
-    
     // Check if a value is null
     bool is_null() const {
         return root == nullptr || yyjson_is_null(root);
     }
-    
+
     // Get a field from the record
     yyjson_val* operator[](const char* key) const {
         return yyjson_obj_get(root, key);
@@ -434,49 +366,38 @@ static std::pair<std::vector<SalesforceRecord>, std::string> ProcessSalesforceRe
     std::vector<SalesforceRecord> records;
     std::string next_records_url = "";
     
-    // Parse JSON using yyjson
-    yyjson_doc *doc = yyjson_read(response_string.c_str(), response_string.size(), YYJSON_READ_ALLOW_INVALID_UNICODE);
+    // Parse JSON using yyjson — shared_ptr so records can reference values within it
+    std::shared_ptr<yyjson_doc> doc(
+        yyjson_read(response_string.c_str(), response_string.size(), YYJSON_READ_ALLOW_INVALID_UNICODE),
+        yyjson_doc_free);
     if (!doc) {
         throw std::runtime_error("Failed to parse Salesforce response");
     }
-    
-    yyjson_val *root = yyjson_doc_get_root(doc);
+
+    yyjson_val *root = yyjson_doc_get_root(doc.get());
     if (!root || yyjson_get_type(root) != YYJSON_TYPE_OBJ) {
-        yyjson_doc_free(doc);
         throw std::runtime_error("Invalid JSON response from Salesforce");
     }
-    
+
     // Get the records array
     yyjson_val *records_arr = yyjson_obj_get(root, "records");
     if (!records_arr || yyjson_get_type(records_arr) != YYJSON_TYPE_ARR) {
-        yyjson_doc_free(doc);
         throw std::runtime_error("Missing or invalid 'records' array in Salesforce response");
     }
-    
-    // Add records
+
+    // Each record shares the parent document — no serialize/reparse needed
     size_t idx, max;
     yyjson_val *record;
     yyjson_arr_foreach(records_arr, idx, max, record) {
-        // For each record, create a new document to ensure independent lifecycle
-        char *record_str = yyjson_val_write(record, 0, nullptr);
-        yyjson_doc *record_doc = yyjson_read(record_str, strlen(record_str), YYJSON_READ_ALLOW_INVALID_UNICODE);
-        free(record_str);
-        
-        if (record_doc) {
-            yyjson_val *record_root = yyjson_doc_get_root(record_doc);
-            records.emplace_back(record_doc, record_root);
-        }
+        records.emplace_back(doc, record);
     }
-    
+
     // Get URL for next page, if any
     yyjson_val *next_records_url_val = yyjson_obj_get(root, "nextRecordsUrl");
     if (next_records_url_val && yyjson_is_str(next_records_url_val)) {
         next_records_url = yyjson_get_str(next_records_url_val);
     }
-    
-    // Free the document as we've copied the records we need
-    yyjson_doc_free(doc);
-    
+
     return {records, next_records_url};
 }
 
