@@ -53,7 +53,7 @@ struct SalesforceCredentials {
 
 // Structure to hold Salesforce scan bind data
 struct SalesforceScanBindData : public TableFunctionData {
-    long row_limit;
+    long row_limit = 0;
     std::string org_secret_name;
     std::string table_name;
     std::vector<SalesforceField> fields;
