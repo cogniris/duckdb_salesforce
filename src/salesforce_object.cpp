@@ -437,37 +437,37 @@ static std::pair<std::vector<SalesforceRecord>, std::string> ContinueSalesforceQ
 }
 
 // Convert Salesforce value to DuckDB value
-static Value ConvertSalesforceValue(yyjson_val *value, const LogicalType &type, const std::string &field_name) {
+static Value ConvertSalesforceValue(yyjson_val *value, const LogicalType &type) {
     if (!value || yyjson_is_null(value)) {
         return Value(type);
     }
-    
+
     switch (type.id()) {
         case LogicalTypeId::VARCHAR:
             if (yyjson_is_str(value)) {
                 return Value(yyjson_get_str(value));
             }
-            throw std::runtime_error("Expected string value for field: " + field_name);
+            return Value(type);
         case LogicalTypeId::BOOLEAN:
             if (yyjson_is_bool(value)) {
                 return Value::BOOLEAN(yyjson_get_bool(value));
             }
-            throw std::runtime_error("Expected boolean value for field: " + field_name);
+            return Value(type);
         case LogicalTypeId::INTEGER:
             if (yyjson_is_int(value)) {
                 return Value::INTEGER((int32_t)yyjson_get_int(value));
             }
-            throw std::runtime_error("Expected integer value for field: " + field_name);
+            return Value(type);
         case LogicalTypeId::BIGINT:
             if (yyjson_is_int(value)) {
                 return Value::BIGINT((int64_t)yyjson_get_int(value));
             }
-            throw std::runtime_error("Expected integer value for field: " + field_name);
+            return Value(type);
         case LogicalTypeId::DOUBLE:
             if (yyjson_is_num(value)) {
                 return Value::DOUBLE(yyjson_get_num(value));
             }
-            throw std::runtime_error("Expected numeric value for field: " + field_name);
+            return Value(type);
         case LogicalTypeId::DATE: {
             if (yyjson_is_str(value)) {
                 std::string date_str = yyjson_get_str(value);
@@ -476,11 +476,11 @@ static Value ConvertSalesforceValue(yyjson_val *value, const LogicalType &type, 
                 idx_t pos = 0;
                 DateCastResult result = Date::TryConvertDate(date_str.c_str(), date_str.length(), pos, date_val, special);
                 if (result != DateCastResult::SUCCESS) {
-                    throw std::runtime_error("Failed to convert Salesforce date value: " + date_str);
+                    return Value(type);
                 }
                 return Value::DATE(date_val);
             }
-            throw std::runtime_error("Expected string date value for field: " + field_name);
+            return Value(type);
         }
         case LogicalTypeId::TIMESTAMP: {
             if (yyjson_is_str(value)) {
@@ -488,11 +488,11 @@ static Value ConvertSalesforceValue(yyjson_val *value, const LogicalType &type, 
                 timestamp_t ts_val;
                 TimestampCastResult result = Timestamp::TryConvertTimestamp(ts_str.c_str(), ts_str.length(), ts_val, false);
                 if (result != TimestampCastResult::SUCCESS) {
-                    throw std::runtime_error("Failed to convert Salesforce timestamp value: " + ts_str);
+                    return Value(type);
                 }
                 return Value::TIMESTAMP(ts_val);
             }
-            throw std::runtime_error("Expected string timestamp value for field: " + field_name);
+            return Value(type);
         }       
         default:
             if (yyjson_is_str(value)) {
@@ -528,17 +528,12 @@ static void WriteRecordsToOutput(SalesforceScanState &state, DataChunk &output) 
             
             const auto &record = state.records[recordIndex];
             
-            try {
-                yyjson_val *field_value = record.root;
-                
-                if (field_value) {
-                    yyjson_val *field_val = yyjson_obj_get(field_value, field.name.c_str());
-                    column.SetValue(outputIndex, ConvertSalesforceValue(field_val, field.duckdb_type, field.name));
-                } else {
-                    column.SetValue(outputIndex, Value(field.duckdb_type));
-                }
-            } catch (const std::exception &e) {
-                // If conversion fails, set to NULL
+            yyjson_val *field_value = record.root;
+
+            if (field_value) {
+                yyjson_val *field_val = yyjson_obj_get(field_value, field.name.c_str());
+                column.SetValue(outputIndex, ConvertSalesforceValue(field_val, field.duckdb_type));
+            } else {
                 column.SetValue(outputIndex, Value(field.duckdb_type));
             }
         }
