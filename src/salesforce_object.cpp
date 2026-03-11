@@ -302,6 +302,50 @@ static Client GetAuthorisedClient(SalesforceCredentials &credentials) {
     return client;
 }
 
+// Common helper: make an authenticated GET request with 401 retry.
+// RequestFn signature: Result(Client&) — allows callers to pass params or not.
+template <typename RequestFn>
+static std::string MakeAuthenticatedGet(
+    SalesforceCredentials &credentials,
+    std::mutex &credentials_mutex,
+    const std::string &error_context,
+    RequestFn request_fn) {
+
+    Client client = [&]() {
+        std::lock_guard<std::mutex> lock(credentials_mutex);
+        return GetAuthorisedClient(credentials);
+    }();
+
+    auto res = request_fn(client);
+    if (res.error() != Error::Success) {
+        throw std::runtime_error("Failed to " + error_context + ": " + std::to_string(static_cast<int>(res.error())));
+    }
+
+    std::string response_string = res->body;
+    long http_code = res->status;
+
+    if (http_code == 401) {
+        std::lock_guard<std::mutex> lock(credentials_mutex);
+        AuthenticateWithSalesforce(credentials);
+        auto retry_client = GetAuthorisedClient(credentials);
+        auto retry_res = request_fn(retry_client);
+        if (retry_res.error() != Error::Success) {
+            throw std::runtime_error("Failed to " + error_context + " after token refresh: " + std::to_string(static_cast<int>(retry_res.error())));
+        }
+        response_string = retry_res->body;
+        http_code = retry_res->status;
+        if (http_code == 401) {
+            throw std::runtime_error("Salesforce authentication failed after token refresh (HTTP 401)");
+        }
+    }
+
+    if (http_code != 200) {
+        throw std::runtime_error("Salesforce API returned error code: " + std::to_string(http_code) + "\nResponse: " + TruncateForError(response_string));
+    }
+
+    return response_string;
+}
+
 // Salesforce data type mapping to DuckDB types
 LogicalType MapSalesforceType(const std::string &sf_type) {
     if (sf_type == "id" || sf_type == "string" || sf_type == "reference" || sf_type == "picklist" || 
@@ -335,38 +379,12 @@ static std::vector<SalesforceField> FetchSalesforceObjectMetadata(const std::str
     
     // If not in cache, fetch from Salesforce API
     std::vector<SalesforceField> fields;
-    
-    // Ensure we have a valid token
-    auto client = GetAuthorisedClient(credentials);
-    
-    std::string url = "/services/data/" + credentials.api_version + "/sobjects/" + object_name + "/describe";
-    auto res = client.Get(url.c_str());
-    
-    if (res.error() != Error::Success) {
-        throw std::runtime_error("Failed to fetch Salesforce object metadata: " + std::to_string(static_cast<int>(res.error())));
-    }
-    
-    std::string response_string = res->body;
-    long http_code = res->status;
-    
-    if (http_code == 401) {
-        // Token expired, refresh and retry once
-        AuthenticateWithSalesforce(credentials);
-        auto retry_client = GetAuthorisedClient(credentials);
-        auto retry_res = retry_client.Get(url.c_str());
-        if (retry_res.error() != Error::Success) {
-            throw std::runtime_error("Failed to fetch Salesforce object metadata after token refresh: " + std::to_string(static_cast<int>(retry_res.error())));
-        }
-        response_string = retry_res->body;
-        http_code = retry_res->status;
-        if (http_code == 401) {
-            throw std::runtime_error("Salesforce authentication failed after token refresh (HTTP 401)");
-        }
-    }
 
-    if (http_code != 200) {
-        throw std::runtime_error("Salesforce API returned error code: " + std::to_string(http_code) + "\nResponse: " + TruncateForError(response_string));
-    }
+    std::string url = "/services/data/" + credentials.api_version + "/sobjects/" + object_name + "/describe";
+    // Bind phase is single-threaded, so use a local mutex for the shared helper
+    std::mutex local_mutex;
+    auto response_string = MakeAuthenticatedGet(credentials, local_mutex, "fetch Salesforce object metadata",
+        [&](Client &c) { return c.Get(url.c_str()); });
 
     try {
         // Parse JSON using yyjson
@@ -483,49 +501,12 @@ static std::pair<std::vector<SalesforceRecord>, std::string> ExecuteSalesforceQu
     SalesforceCredentials &credentials,
     std::mutex &credentials_mutex) {
 
-    Client client = [&]() {
-        std::lock_guard<std::mutex> lock(credentials_mutex);
-        return GetAuthorisedClient(credentials);
-    }();
-
-    // Use httplib's query parameter handling
     std::string url = "/services/data/" + credentials.api_version + "/query";
     Params params;
     params.emplace("q", query);
 
-    // Create empty headers - the GetAuthorisedClient already set default headers
-    Headers headers;
-
-    // Use httplib's Get method with query parameters and empty headers
-    auto res = client.Get(url.c_str(), params, headers);
-
-    if (res.error() != Error::Success) {
-        throw std::runtime_error("Failed to execute Salesforce query: " + std::to_string(static_cast<int>(res.error())));
-    }
-
-    std::string response_string = res->body;
-    long http_code = res->status;
-
-    if (http_code == 401) {
-        // Token expired, refresh and retry once (under lock)
-        std::lock_guard<std::mutex> lock(credentials_mutex);
-        AuthenticateWithSalesforce(credentials);
-        auto retry_client = GetAuthorisedClient(credentials);
-        Headers retry_headers;
-        auto retry_res = retry_client.Get(url.c_str(), params, retry_headers);
-        if (retry_res.error() != Error::Success) {
-            throw std::runtime_error("Failed to execute Salesforce query after token refresh: " + std::to_string(static_cast<int>(retry_res.error())));
-        }
-        response_string = retry_res->body;
-        http_code = retry_res->status;
-        if (http_code == 401) {
-            throw std::runtime_error("Salesforce authentication failed after token refresh (HTTP 401)");
-        }
-    }
-
-    if (http_code != 200) {
-        throw std::runtime_error("Salesforce API returned error code: " + std::to_string(http_code) + "\nResponse: " + TruncateForError(response_string));
-    }
+    auto response_string = MakeAuthenticatedGet(credentials, credentials_mutex, "execute Salesforce query",
+        [&](Client &c) { Headers h; return c.Get(url.c_str(), params, h); });
 
     try {
         return ProcessSalesforceResponse(response_string);
@@ -539,38 +520,8 @@ static std::pair<std::vector<SalesforceRecord>, std::string> ContinueSalesforceQ
     SalesforceCredentials &credentials,
     std::mutex &credentials_mutex) {
 
-    Client client = [&]() {
-        std::lock_guard<std::mutex> lock(credentials_mutex);
-        return GetAuthorisedClient(credentials);
-    }();
-
-    auto res = client.Get(next_records_url.c_str());
-    if (res.error() != Error::Success) {
-        throw std::runtime_error("Failed to continue Salesforce query: " + std::to_string(static_cast<int>(res.error())));
-    }
-
-    std::string response_string = res->body;
-    long http_code = res->status;
-
-    if (http_code == 401) {
-        // Token expired, refresh and retry once (under lock)
-        std::lock_guard<std::mutex> lock(credentials_mutex);
-        AuthenticateWithSalesforce(credentials);
-        auto retry_client = GetAuthorisedClient(credentials);
-        auto retry_res = retry_client.Get(next_records_url.c_str());
-        if (retry_res.error() != Error::Success) {
-            throw std::runtime_error("Failed to continue Salesforce query after token refresh: " + std::to_string(static_cast<int>(retry_res.error())));
-        }
-        response_string = retry_res->body;
-        http_code = retry_res->status;
-        if (http_code == 401) {
-            throw std::runtime_error("Salesforce authentication failed after token refresh (HTTP 401)");
-        }
-    }
-
-    if (http_code != 200) {
-        throw std::runtime_error("Salesforce API returned error code: " + std::to_string(http_code) + "\nResponse: " + TruncateForError(response_string));
-    }
+    auto response_string = MakeAuthenticatedGet(credentials, credentials_mutex, "continue Salesforce query",
+        [&](Client &c) { return c.Get(next_records_url.c_str()); });
 
     try {
         return ProcessSalesforceResponse(response_string);
