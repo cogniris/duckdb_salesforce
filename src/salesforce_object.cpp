@@ -722,8 +722,7 @@ static void SalesforceObjectScan(ClientContext &context, TableFunctionInput &dat
     }
 
     if (state.count_only) {
-        auto rowCount = output.GetValue(0, 0).GetValue<int64_t>();
-        output.SetCardinality(rowCount);
+        output.SetCardinality(1);
     } else {
         output.SetCardinality(state.current_chunk_idx);
     }
@@ -842,11 +841,11 @@ static void GenerateSOQLWhereClauseInternal(const std::string &column_name, Tabl
             return;
         }
         case duckdb::TableFilterType::IS_NULL: {
-            where_clause << column_name << " = NULL";
+            where_clause << column_name << " = null";
             return;
         }
         case duckdb::TableFilterType::IS_NOT_NULL: {
-            where_clause << column_name << " != NULL";
+            where_clause << column_name << " != null";
             return;
         }
         case duckdb::TableFilterType::CONJUNCTION_OR:
@@ -914,6 +913,9 @@ static unique_ptr<LocalTableFunctionState> SalesforceObjectInitLocalState(Execut
             scan_state->selected_fields.push_back(countField);
         } else {
             for (const auto &col_idx : input.column_ids) {
+                if (col_idx >= bind_data.fields.size()) {
+                    throw InternalException("Column index %llu out of range (object has %llu fields)", col_idx, bind_data.fields.size());
+                }
                 scan_state->selected_fields.push_back(bind_data.fields[col_idx]);
             }
         }
