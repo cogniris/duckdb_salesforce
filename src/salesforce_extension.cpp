@@ -74,7 +74,7 @@ static void LoadInternal(ExtensionLoader &loader) {
     auto salesforce_object_func = make_uniq<SalesforceObjectFunction>();
     loader.RegisterFunction(*salesforce_object_func);
 
-      // Register replacement scan for read_gsheet
+    // Register replacement scan for salesforce_object
     auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
     config.replacement_scans.emplace_back(ReadObjectReplacement);
 }

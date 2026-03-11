@@ -1,5 +1,5 @@
 #include "salesforce_object.hpp"
-#include "include/salesforce_metadata_cache.hpp"
+#include "salesforce_metadata_cache.hpp"
 #include "duckdb.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/common/types/date.hpp"
@@ -76,75 +76,60 @@ struct SalesforceRecord {
         }
     }
     
-    // Copy constructor
+    // Copy constructor — required by std::pair/vector type constraints.
+    // Uses JSON round-trip since yyjson immutable docs have no native deep copy.
+    // Prefer move semantics where possible.
     SalesforceRecord(const SalesforceRecord &other) {
         if (!other.doc || !other.root) {
             doc = nullptr;
             root = nullptr;
             return;
         }
-        
-        // Create a deep copy of the document
-        yyjson_read_flag flags = YYJSON_READ_ALLOW_INVALID_UNICODE;
+
         char *json_str = yyjson_val_write(other.root, 0, nullptr);
         if (!json_str) {
             doc = nullptr;
             root = nullptr;
             return;
         }
-        
-        doc = yyjson_read(json_str, strlen(json_str), flags);
+
+        doc = yyjson_read(json_str, strlen(json_str), YYJSON_READ_ALLOW_INVALID_UNICODE);
         free(json_str);
-        
-        if (!doc) {
-            root = nullptr;
-            return;
-        }
-        
-        root = yyjson_doc_get_root(doc);
+        root = doc ? yyjson_doc_get_root(doc) : nullptr;
     }
-    
+
     // Move constructor
     SalesforceRecord(SalesforceRecord &&other) noexcept : doc(other.doc), root(other.root) {
         other.doc = nullptr;
         other.root = nullptr;
     }
     
-    // Assignment operator
     SalesforceRecord& operator=(const SalesforceRecord &other) {
         if (this != &other) {
             if (doc) {
                 yyjson_doc_free(doc);
             }
-            
+
             if (!other.doc || !other.root) {
                 doc = nullptr;
                 root = nullptr;
                 return *this;
             }
-            
-            // Create a deep copy of the document
-            yyjson_read_flag flags = YYJSON_READ_ALLOW_INVALID_UNICODE;
+
             char *json_str = yyjson_val_write(other.root, 0, nullptr);
             if (!json_str) {
                 doc = nullptr;
                 root = nullptr;
                 return *this;
             }
-            
-            doc = yyjson_read(json_str, strlen(json_str), flags);
+
+            doc = yyjson_read(json_str, strlen(json_str), YYJSON_READ_ALLOW_INVALID_UNICODE);
             free(json_str);
-            
-            if (!doc) {
-                root = nullptr;
-                return *this;
-            }
-            
-            root = yyjson_doc_get_root(doc);
+            root = doc ? yyjson_doc_get_root(doc) : nullptr;
         }
         return *this;
     }
-    
+
     // Move assignment operator
     SalesforceRecord& operator=(SalesforceRecord &&other) noexcept {
         if (this != &other) {
@@ -371,9 +356,9 @@ LogicalType MapSalesforceType(const std::string &sf_type) {
 // Function to fetch Salesforce object metadata
 static std::vector<SalesforceField> FetchSalesforceObjectMetadata(const std::string &object_name, SalesforceCredentials &credentials) {
     // Check if metadata is in cache
-    auto cache = SalesforceMetadataCache::GetInstance();
+    auto &cache = SalesforceMetadataCache::GetInstance();
     std::vector<SalesforceField> cached_fields;
-    if (cache->TryGetFromCache(object_name, cached_fields)) {
+    if (cache.TryGetFromCache(object_name, cached_fields)) {
         return cached_fields;
     }
     
@@ -434,7 +419,7 @@ static std::vector<SalesforceField> FetchSalesforceObjectMetadata(const std::str
         yyjson_doc_free(doc);
 
         // Add metadata to cache
-        cache->AddToCache(object_name, fields);
+        cache.AddToCache(object_name, fields);
     } catch (const std::exception &e) {
         throw std::runtime_error("Failed to parse Salesforce metadata: " + std::string(e.what()));
     }
@@ -506,7 +491,7 @@ static std::pair<std::vector<SalesforceRecord>, std::string> ExecuteSalesforceQu
     params.emplace("q", query);
 
     auto response_string = MakeAuthenticatedGet(credentials, credentials_mutex, "execute Salesforce query",
-        [&](Client &c) { Headers h; return c.Get(url.c_str(), params, h); });
+        [&](Client &c) { return c.Get(url.c_str(), params, Headers{}); });
 
     try {
         return ProcessSalesforceResponse(response_string);
@@ -844,15 +829,15 @@ static void GenerateSOQLWhereClauseInternal(const std::string &column_name, Tabl
         }
         case duckdb::TableFilterType::CONJUNCTION_OR:
         case duckdb::TableFilterType::CONJUNCTION_AND: {
-            auto conjuction_filter = reinterpret_cast<duckdb::ConjunctionFilter *>(filter);
+            auto conjunction_filter = reinterpret_cast<duckdb::ConjunctionFilter *>(filter);
             where_clause << "(";
-            if (conjuction_filter->child_filters.size() > 1) {
-                for (idx_t i = 0; i < conjuction_filter->child_filters.size() - 1; i++) {
-                    GenerateSOQLWhereClauseInternal(column_name, conjuction_filter->child_filters[i].get(), where_clause);
+            if (conjunction_filter->child_filters.size() > 1) {
+                for (idx_t i = 0; i < conjunction_filter->child_filters.size() - 1; i++) {
+                    GenerateSOQLWhereClauseInternal(column_name, conjunction_filter->child_filters[i].get(), where_clause);
                     where_clause << (filter->filter_type == duckdb::TableFilterType::CONJUNCTION_OR ? " OR " : " AND ");
                 }
             }
-            GenerateSOQLWhereClauseInternal(column_name, conjuction_filter->child_filters.back().get(), where_clause);
+            GenerateSOQLWhereClauseInternal(column_name, conjunction_filter->child_filters.back().get(), where_clause);
             where_clause << ")";
             return;
         }
